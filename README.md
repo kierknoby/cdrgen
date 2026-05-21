@@ -149,7 +149,8 @@ After insertion, cdrgen prints:
 - disposition mix
 - trunk mix
 - expected answered-only global concurrency peak
-- expected answered-only per-extension peaks
+- expected answered-only per-extension handled-call peaks
+- expected answered-only per-extension channel-leg peaks
 - expected answered-only per-trunk peaks
 - cleanup SQL commands
 
@@ -158,6 +159,11 @@ Non-answered calls are inserted into CDR but excluded from expected concurrency 
 ## Algorithm Notes
 
 Expected concurrency uses answered-only per-second occupancy with inclusive endpoints. A call active from `t_start` through `t_end` increments the occupancy counter for every second in `[t_start, t_end]`, and the peak is the maximum value across all occupied seconds.
+
+cdrgen prints two extension views:
+
+- Per-extension handled-call peak mirrors the original bash Extension mode: one selected extension per CDR row, preferring `dstchannel` and falling back to `channel`, with destination numbers starting `1` or `9` excluded.
+- Per-extension channel-leg peak counts every distinct visible extension leg in `channel` and `dstchannel` values matching `PJSIP/NNNN-...`.
 
 This matches the bash `concurrency-count` CLI tool, concurrencycount's `Original` engine, FreePBX CDR Reports' historical concurrent-calls implementation, and Asterisk-style runtime channel counting. A call ending at second `200` and another call starting at second `200` both count at second `200`.
 

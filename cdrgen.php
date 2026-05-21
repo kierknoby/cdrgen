@@ -116,7 +116,8 @@ $inboundTargets = [
 $outboundPrefixes = ['1212', '1646', '1718', '1310', '1415', '1617', '1202', '1303', '1800', '1888'];
 $expected = [
     'global' => [],
-    'extensions' => [],
+    'extensions_handled' => [],
+    'extensions_channel' => [],
     'trunks' => [],
 ];
 $coverageRows = [
@@ -1440,8 +1441,14 @@ function generateCdrRow(
 
 function addExpectedCall(array &$expected, array $row): void
 {
+    if (!rowHasPjsipChannel($row)) {
+        return;
+    }
+
     $start = (int)$row['_answer_ts'];
     $end = min((int)$row['_end_ts'], $start + 86400);
+    $handledExtension = handledPjsipExtension($row);
+    $visibleExtensions = visiblePjsipExtensions($row);
 
     if ($end < $start) {
         return;
@@ -1450,12 +1457,20 @@ function addExpectedCall(array &$expected, array $row): void
     for ($ts = $start; $ts <= $end; $ts++) {
         incrementSecond($expected['global'], $ts);
 
-        foreach ($row['_extensions'] as $extension) {
-            if (!isset($expected['extensions'][$extension])) {
-                $expected['extensions'][$extension] = [];
+        if ($handledExtension !== null) {
+            if (!isset($expected['extensions_handled'][$handledExtension])) {
+                $expected['extensions_handled'][$handledExtension] = [];
             }
 
-            incrementSecond($expected['extensions'][$extension], $ts);
+            incrementSecond($expected['extensions_handled'][$handledExtension], $ts);
+        }
+
+        foreach ($visibleExtensions as $extension) {
+            if (!isset($expected['extensions_channel'][$extension])) {
+                $expected['extensions_channel'][$extension] = [];
+            }
+
+            incrementSecond($expected['extensions_channel'][$extension], $ts);
         }
 
         if ($row['_trunk'] !== null) {
@@ -1466,6 +1481,48 @@ function addExpectedCall(array &$expected, array $row): void
             incrementSecond($expected['trunks'][$row['_trunk']], $ts);
         }
     }
+}
+
+function handledPjsipExtension(array $row): ?string
+{
+    $dst = (string)($row['dst'] ?? '');
+    if (preg_match('/^[19]/', $dst) === 1) {
+        return null;
+    }
+
+    $dstchannel = (string)($row['dstchannel'] ?? '');
+    if (preg_match('/^PJSIP\/([0-9]+)-/', $dstchannel, $matches) === 1) {
+        return $matches[1];
+    }
+
+    $channel = (string)($row['channel'] ?? '');
+    if (preg_match('/^PJSIP\/([0-9]+)-/', $channel, $matches) === 1) {
+        return $matches[1];
+    }
+
+    return null;
+}
+
+function rowHasPjsipChannel(array $row): bool
+{
+    return strpos((string)($row['channel'] ?? ''), 'PJSIP/') === 0
+        || strpos((string)($row['dstchannel'] ?? ''), 'PJSIP/') === 0;
+}
+
+function visiblePjsipExtensions(array $row): array
+{
+    $extensions = [];
+
+    foreach (['channel', 'dstchannel'] as $field) {
+        $channel = (string)($row[$field] ?? '');
+        if (preg_match_all('/(?:^|&)PJSIP\/([0-9]+)-/', $channel, $matches)) {
+            foreach ($matches[1] as $extension) {
+                $extensions[$extension] = true;
+            }
+        }
+    }
+
+    return array_keys($extensions);
 }
 
 function incrementSecond(array &$secondsMap, int $ts): void
@@ -1517,8 +1574,11 @@ function printExpected(array $expected): void
     echo "----------------------------------\n";
     echo "Global peak: " . peakConcurrency($expected['global']) . "\n";
 
-    echo "\nPer-extension peak:\n";
-    printPeakMap($expected['extensions']);
+    echo "\nPer-extension handled-call peak (OG Extension mode):\n";
+    printPeakMap($expected['extensions_handled']);
+
+    echo "\nPer-extension channel-leg peak:\n";
+    printPeakMap($expected['extensions_channel']);
 
     echo "\nPer-trunk peak:\n";
     printPeakMap($expected['trunks']);
