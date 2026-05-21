@@ -36,20 +36,12 @@ cdrgen inserts tagged, realistic mixed telephony traffic into `asteriskcdrdb.cdr
 
 ## Installation
 
-Clone the repository:
-
 ```bash
 git clone https://github.com/kierknoby/cdrgen.git ~/cdrgen
+sudo ~/cdrgen/install.sh
 ```
 
-For the recommended setup, make cdrgen invokable as a system command:
-
-```bash
-chmod +x ~/cdrgen/cdrgen.php
-sudo ln -sf ~/cdrgen/cdrgen.php /usr/local/bin/cdrgen
-```
-
-Now you can run cdrgen from anywhere:
+That's it. cdrgen is now available system-wide:
 
 ```bash
 cdrgen
