@@ -2,6 +2,10 @@
 
 Synthetic realistic CDR generator for FreePBX/Asterisk concurrency testing and validation.
 
+Version: `1.0.0`
+
+Status: suitable for testing purposes only. Do not use in production.
+
 cdrgen inserts tagged, realistic mixed telephony traffic into `asteriskcdrdb.cdr` so tools such as `concurrencycount`, CDR Reports concurrent calls, and SQL-based reporting engines can be tested against known synthetic datasets.
 
 Only answered PJSIP calls (`disposition = 'ANSWERED'`) contribute to the expected concurrency calculation. A ringing or failed call is not a concurrent call. Non-answered calls are still inserted into CDR for traffic-mix realism.

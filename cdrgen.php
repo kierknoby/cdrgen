@@ -13,6 +13,7 @@ if (PHP_SAPI !== 'cli') {
 }
 
 const ACCOUNT_PREFIX = 'CCTEST';
+const CDRGEN_VERSION = '1.0.0';
 const EXPECTED_MAX_CALL_SECONDS = 86400;
 const EXPECTED_CHUNK_SECONDS = 3600;
 
@@ -134,6 +135,7 @@ $coverageRows = [
 
 echo "cdrgen\n";
 echo "======\n";
+echo "Version: " . CDRGEN_VERSION . " (testing only, do not use in production)\n";
 echo "Profile: {$profile}\n";
 echo "Rows: {$rows}\n";
 echo "Seed: {$seed}\n";
@@ -212,6 +214,7 @@ function usage(int $exitCode): void
         $script = 'cdrgen';
     }
 
+    echo "cdrgen " . CDRGEN_VERSION . " (testing only, do not use in production)\n";
     echo "Usage: {$script} --profile=light|medium|heavy [--seed=N] [--rows=N] [--start=DATE] [--end=DATE] [--trunks=LIST] [--fake-trunks=N]\n";
     echo "Dates are parsed by PHP strtotime(), for example: 2026-05-01 00:00:00\n";
     echo "Trunks are comma-separated channel names, for example: PJSIP/primary,SIP/backup\n";
@@ -223,7 +226,8 @@ function runWizard(): array
     global $profiles;
 
     echo "cdrgen interactive wizard\n";
-    echo "=========================\n\n";
+    echo "=========================\n";
+    echo "Version: " . CDRGEN_VERSION . " (testing only, do not use in production)\n\n";
 
     $opts = [];
 
