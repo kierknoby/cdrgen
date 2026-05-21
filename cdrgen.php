@@ -28,6 +28,8 @@ $opts = getopt('', [
     'rows::',
     'start::',
     'end::',
+    'trunks::',
+    'fake-trunks::',
     'help',
 ]);
 
@@ -72,8 +74,10 @@ $extensionNames = [
     '2100' => 'Warehouse',
     '2200' => 'Billing',
 ];
-$trunks = ['SIP/flowroute', 'PJSIP/twilio', 'SIP/voipms', 'PJSIP/siptrunk'];
-$dids = ['2125550100', '2125550101', '6465550110', '7185550199', '8005550180'];
+$trunkProfiles = buildTrunkProfiles(
+    isset($opts['trunks']) ? (string)$opts['trunks'] : '',
+    isset($opts['fake-trunks']) ? parsePositiveInt($opts['fake-trunks'], '--fake-trunks') : 0
+);
 $externalNumbers = [
     '12125550111',
     '12125550112',
@@ -127,6 +131,7 @@ $schedule = buildTrafficSchedule($start, $end, $rows);
 $stats = [
     'directions' => [],
     'dispositions' => [],
+    'trunks' => [],
 ];
 
 $pdo->beginTransaction();
@@ -145,8 +150,7 @@ try {
                 $accountcode,
                 $extensions,
                 $extensionNames,
-                $trunks,
-                $dids,
+                $trunkProfiles,
                 $externalNumbers,
                 $inboundTargets,
                 $outboundPrefixes,
@@ -158,6 +162,9 @@ try {
             $inserted++;
             incrementStat($stats['directions'], $row['_direction']);
             incrementStat($stats['dispositions'], $row['disposition']);
+            if ($row['_trunk'] !== null) {
+                incrementStat($stats['trunks'], $row['_trunk']);
+            }
 
             if ($row['disposition'] === 'ANSWERED') {
                 addExpectedCall($expected, $row);
@@ -181,23 +188,62 @@ echo "\nCleanup SQL\n";
 echo "-----------\n";
 echo "mysql asteriskcdrdb -e \"" . $cleanupOne . "\"\n";
 echo "mysql asteriskcdrdb -e \"" . $cleanupAll . "\"\n";
-echo "\nType DELETE to remove rows from this run now: ";
-$answer = trim((string)fgets(STDIN));
-
-if ($answer === 'DELETE') {
-    $stmt = $pdo->prepare('DELETE FROM cdr WHERE accountcode = :accountcode');
-    $stmt->execute([':accountcode' => $accountcode]);
-    echo "Deleted " . $stmt->rowCount() . " rows for {$accountcode}\n";
-} else {
-    echo "Rows retained.\n";
-}
+promptCleanup($pdo, $accountcode);
 
 function usage(int $exitCode): void
 {
     $script = basename(__FILE__);
-    echo "Usage: php {$script} --profile=light|medium|heavy [--seed=N] [--rows=N] [--start=DATE] [--end=DATE]\n";
+    echo "Usage: php {$script} --profile=light|medium|heavy [--seed=N] [--rows=N] [--start=DATE] [--end=DATE] [--trunks=LIST] [--fake-trunks=N]\n";
     echo "Dates are parsed by PHP strtotime(), for example: 2026-05-01 00:00:00\n";
+    echo "Trunks are comma-separated channel names, for example: PJSIP/primary,SIP/backup\n";
     exit($exitCode);
+}
+
+function promptCleanup(PDO $pdo, string $accountcode): void
+{
+    echo "\nType DELETE to remove rows from this run, or KEEP to retain rows and exit.\n";
+
+    while (true) {
+        echo "[" . date('Y-m-d H:i:s') . "] DELETE or KEEP: ";
+        $read = [STDIN];
+        $write = null;
+        $except = null;
+        $ready = @stream_select($read, $write, $except, 60);
+
+        if ($ready === false) {
+            $answer = trim((string)fgets(STDIN));
+        } elseif ($ready > 0) {
+            $line = fgets(STDIN);
+            if ($line === false) {
+                echo "\nSTDIN closed; rows retained.\n";
+                return;
+            }
+
+            $answer = trim($line);
+        } else {
+            echo "\nStill waiting. Rows remain tagged with accountcode {$accountcode}.\n";
+            continue;
+        }
+
+        if ($answer === '') {
+            echo "Still waiting. Type DELETE to clean up, or KEEP to exit.\n";
+            continue;
+        }
+
+        if ($answer === 'DELETE') {
+            $stmt = $pdo->prepare('DELETE FROM cdr WHERE accountcode = :accountcode');
+            $stmt->execute([':accountcode' => $accountcode]);
+            echo "Deleted " . $stmt->rowCount() . " rows for {$accountcode}\n";
+            return;
+        }
+
+        if ($answer === 'KEEP') {
+            echo "Rows retained.\n";
+            return;
+        }
+
+        echo "Unrecognized input. Type DELETE to clean up, or KEEP to exit.\n";
+    }
 }
 
 function parseInt($value, string $name): int
@@ -361,6 +407,143 @@ function defaultColumnValue(string $column, array $meta)
     return '';
 }
 
+function buildTrunkProfiles(string $customTrunks, int $fakeTrunks): array
+{
+    if ($customTrunks !== '') {
+        $profiles = [];
+        $parts = explode(',', $customTrunks);
+        foreach ($parts as $index => $part) {
+            $channel = normalizeTrunkChannel(trim($part));
+            if ($channel === '') {
+                continue;
+            }
+
+            $profiles[] = trunkProfile(
+                $channel,
+                100 - min(75, $index * 15),
+                70,
+                30,
+                didPoolFor($index),
+                prefixPoolFor($index),
+                $index >= 2
+            );
+        }
+
+        if ($profiles !== []) {
+            return $profiles;
+        }
+    }
+
+    $profiles = [
+        trunkProfile('PJSIP/flowroute-main', 42, 58, 42, ['2125550100', '2125550101'], ['1212', '1646', '1718', '1800'], false),
+        trunkProfile('PJSIP/twilio-elastic', 28, 44, 56, ['6465550110', '6465550111'], ['1646', '1415', '1617', '1888'], false),
+        trunkProfile('SIP/voipms-nyc', 18, 36, 64, ['7185550199', '7185550198'], ['1718', '1202', '1303'], false),
+        trunkProfile('PJSIP/bandwidth-tollfree', 9, 82, 18, ['8005550180', '8885550181'], ['1800', '1888'], false),
+        trunkProfile('SIP/backup-carrier', 3, 20, 80, ['2125550190'], ['1212', '1646', '1718'], true),
+    ];
+
+    $names = ['peerless-west', 'bulkvs-ld', 'inteliquent-overflow', 'telnyx-backup', 'questblue-lcr', 'thinQ-failover'];
+    for ($i = 0; $i < $fakeTrunks; $i++) {
+        $tech = $i % 3 === 0 ? 'SIP' : 'PJSIP';
+        $name = $names[$i % count($names)] . '-' . ($i + 1);
+        $profiles[] = trunkProfile(
+            "{$tech}/{$name}",
+            max(2, 16 - $i),
+            mt_rand(25, 65),
+            mt_rand(35, 75),
+            didPoolFor($i + 10),
+            prefixPoolFor($i + 10),
+            true
+        );
+    }
+
+    return $profiles;
+}
+
+function trunkProfile(string $channel, int $weight, int $inboundWeight, int $outboundWeight, array $dids, array $prefixes, bool $degraded): array
+{
+    return [
+        'channel' => $channel,
+        'name' => trunkName($channel),
+        'weight' => max(1, $weight),
+        'inbound_weight' => max(1, $inboundWeight),
+        'outbound_weight' => max(1, $outboundWeight),
+        'dids' => $dids,
+        'prefixes' => $prefixes,
+        'failed_boost' => $degraded ? mt_rand(3, 8) : 0,
+        'busy_boost' => $degraded ? mt_rand(2, 6) : 0,
+        'jitter' => mt_rand(0, 4),
+    ];
+}
+
+function normalizeTrunkChannel(string $value): string
+{
+    if ($value === '') {
+        return '';
+    }
+
+    if (strpos($value, '/') === false) {
+        return "PJSIP/{$value}";
+    }
+
+    return $value;
+}
+
+function didPoolFor(int $index): array
+{
+    $areaCodes = ['212', '646', '718', '800', '888', '415', '617', '202', '303', '310'];
+    $area = $areaCodes[$index % count($areaCodes)];
+    $base = 100 + ($index * 7);
+
+    return [
+        $area . '555' . sprintf('%04d', $base % 10000),
+        $area . '555' . sprintf('%04d', ($base + 1) % 10000),
+    ];
+}
+
+function prefixPoolFor(int $index): array
+{
+    $sets = [
+        ['1212', '1646', '1718'],
+        ['1415', '1617', '1888'],
+        ['1202', '1303', '1310'],
+        ['1800', '1888', '1877'],
+    ];
+
+    return $sets[$index % count($sets)];
+}
+
+function pickTrunkProfile(array $profiles, string $direction): array
+{
+    $weights = [];
+
+    foreach ($profiles as $index => $profile) {
+        $weight = (int)$profile['weight'];
+        if ($direction === 'inbound') {
+            $weight = (int)$profile['inbound_weight'];
+        } elseif ($direction === 'outbound') {
+            $weight = (int)$profile['outbound_weight'];
+        }
+
+        $weights[(string)$index] = max(1, $weight + mt_rand(0, (int)$profile['jitter']));
+    }
+
+    return $profiles[(int)weightedChoice($weights)];
+}
+
+function trunkDispositionWeights(string $direction, int $ts, array $trunkProfile): array
+{
+    $weights = dispositionWeights($direction, $ts);
+
+    if ($direction !== 'internal') {
+        $weights['FAILED'] += (int)$trunkProfile['failed_boost'];
+        $weights['BUSY'] += (int)$trunkProfile['busy_boost'];
+        $weights['ANSWERED'] = max(20, $weights['ANSWERED'] - (int)floor(((int)$trunkProfile['failed_boost'] + (int)$trunkProfile['busy_boost']) / 2));
+    }
+
+    return $weights;
+}
+
 function buildTrafficSchedule(int $start, int $end, int $rows): array
 {
     $schedule = [];
@@ -520,7 +703,12 @@ function endpointChannel(string $extension): string
 {
     $tech = mt_rand(1, 100) <= 86 ? 'PJSIP' : 'SIP';
 
-    return "{$tech}/{$extension}-" . randomHex(8);
+    return channelInstance("{$tech}/{$extension}");
+}
+
+function channelInstance(string $base): string
+{
+    return $base . '-' . sprintf('%08x', mt_rand(1, 0x7fffffff));
 }
 
 function externalNumber(array $externalNumbers, array $outboundPrefixes): string
@@ -615,8 +803,7 @@ function generateCdrRow(
     string $accountcode,
     array $extensions,
     array $extensionNames,
-    array $trunks,
-    array $dids,
+    array $trunkProfiles,
     array $externalNumbers,
     array $inboundTargets,
     array $outboundPrefixes,
@@ -624,7 +811,10 @@ function generateCdrRow(
     ?string $forcedDisposition = null
 ): array {
     $direction = $forcedDirection ?? weightedChoice(directionWeights($ts));
-    $disposition = $forcedDisposition ?? weightedChoice(dispositionWeights($direction, $ts));
+    $trunkProfile = $direction === 'internal' ? null : pickTrunkProfile($trunkProfiles, $direction);
+    $disposition = $forcedDisposition ?? weightedChoice(
+        $trunkProfile === null ? dispositionWeights($direction, $ts) : trunkDispositionWeights($direction, $ts, $trunkProfile)
+    );
     $duration = durationFor($direction, $disposition, $cfg);
     $billsec = $disposition === 'ANSWERED' ? max(1, $duration - ringSeconds($direction)) : 0;
     $answerOffset = $disposition === 'ANSWERED' ? ($duration - $billsec) : 0;
@@ -633,9 +823,9 @@ function generateCdrRow(
     $sequence = mt_rand(1, 9999);
     $extension = pick($extensions);
     $peerExtension = pick(array_values(array_diff($extensions, [$extension])));
-    $trunk = pick($trunks);
-    $external = externalNumber($externalNumbers, $outboundPrefixes);
-    $did = pick($dids);
+    $trunk = $trunkProfile['channel'] ?? '';
+    $external = externalNumber($externalNumbers, $trunkProfile['prefixes'] ?? $outboundPrefixes);
+    $did = pick($trunkProfile['dids'] ?? ['2125550100']);
     $route = 'cdrgen';
     $hangupSource = '';
     $hangupCause = hangupCause($disposition);
@@ -650,7 +840,7 @@ function generateCdrRow(
         $dst = $extension;
         $callerName = callerName();
         $clid = "\"{$callerName}\" <{$external}>";
-        $channel = "{$trunk}-" . randomHex(8);
+        $channel = channelInstance($trunk);
         $dstchannel = $disposition === 'FAILED' ? '' : endpointChannel($extension);
         $dcontext = 'from-trunk';
         $lastapp = lastAppFor($disposition, $target['type']);
@@ -683,7 +873,7 @@ function generateCdrRow(
         $extName = $extensionNames[$extension] ?? "Extension {$extension}";
         $clid = "\"{$extName}\" <{$extension}>";
         $channel = endpointChannel($extension);
-        $dstchannel = $disposition === 'FAILED' ? '' : "{$trunk}-" . randomHex(8);
+        $dstchannel = $disposition === 'FAILED' ? '' : channelInstance($trunk);
         $dcontext = 'from-internal';
         $lastapp = lastAppFor($disposition, 'dial');
         $lastdata = "{$trunk}/{$external},300,Ttr";
@@ -750,6 +940,10 @@ function generateCdrRow(
         'end' => date('Y-m-d H:i:s', $endTs),
         'start' => date('Y-m-d H:i:s', $ts),
         'dstaccountcode' => '',
+        'trunk' => $direction === 'internal' ? '' : $trunkName,
+        'trunkname' => $direction === 'internal' ? '' : $trunkName,
+        'carrier' => $direction === 'internal' ? '' : $trunkName,
+        'direction' => $direction,
         'queue' => $queue,
         '_direction' => $direction,
         '_answer_ts' => $ts + $answerOffset,
@@ -822,6 +1016,12 @@ function printStats(array $stats): void
     ksort($stats['dispositions']);
     foreach ($stats['dispositions'] as $disposition => $count) {
         echo "  {$disposition}: {$count}\n";
+    }
+
+    echo "\nTrunk mix:\n";
+    ksort($stats['trunks']);
+    foreach ($stats['trunks'] as $trunk => $count) {
+        echo "  {$trunk}: {$count}\n";
     }
 
     echo "\n";
