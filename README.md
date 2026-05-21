@@ -56,6 +56,16 @@ php ~/cdrgen/cdrgen.php --profile=medium --seed=202
 php ~/cdrgen/cdrgen.php --profile=heavy --seed=303
 ```
 
+## Interactive Mode
+
+Run without arguments for an interactive wizard:
+
+```bash
+php ~/cdrgen/cdrgen.php
+```
+
+The wizard prompts for profile, seed, date range, and trunk options, then runs the same generation as the CLI flags.
+
 With explicit row and date range:
 
 ```bash

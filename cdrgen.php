@@ -11,9 +11,6 @@ if (PHP_SAPI !== 'cli') {
     exit(1);
 }
 
-$bootstrap_settings['freepbx_auth'] = false;
-require_once '/etc/freepbx.conf';
-
 const ACCOUNT_PREFIX = 'CCTEST';
 
 $profiles = [
@@ -22,7 +19,7 @@ $profiles = [
     'heavy'  => ['rows' => 15000, 'days' => 30, 'min' => 15, 'max' => 2400],
 ];
 
-$opts = getopt('', [
+$longOptions = [
     'profile::',
     'seed::',
     'rows::',
@@ -31,10 +28,15 @@ $opts = getopt('', [
     'trunks::',
     'fake-trunks::',
     'help',
-]);
+];
 
-if (isset($opts['help'])) {
-    usage(0);
+if ($argc === 1) {
+    $opts = runWizard();
+} else {
+    $opts = getopt('', $longOptions);
+    if (isset($opts['help'])) {
+        usage(0);
+    }
 }
 
 $profile = (string)($opts['profile'] ?? 'light');
@@ -53,6 +55,9 @@ if ($start >= $end) {
     fwrite(STDERR, "--start must be earlier than --end\n");
     exit(1);
 }
+
+$bootstrap_settings['freepbx_auth'] = false;
+require_once '/etc/freepbx.conf';
 
 mt_srand($seed);
 
@@ -203,6 +208,181 @@ function usage(int $exitCode): void
     echo "Dates are parsed by PHP strtotime(), for example: 2026-05-01 00:00:00\n";
     echo "Trunks are comma-separated channel names, for example: PJSIP/primary,SIP/backup\n";
     exit($exitCode);
+}
+
+function runWizard(): array
+{
+    global $profiles;
+
+    echo "CDRgen interactive wizard\n";
+    echo "=========================\n\n";
+
+    $opts = [];
+
+    $profile = ask('Profile [light/medium/heavy]', 'light', static function (string $input) {
+        return matchProfile($input) ?? false;
+    });
+    $opts['profile'] = $profile;
+
+    $seedInput = ask('Seed (number, blank for random)', null, static function (string $input) {
+        if ($input === '') {
+            return true;
+        }
+
+        return ctype_digit($input) && (int)$input > 0;
+    });
+    $seedWasRandom = $seedInput === '';
+
+    echo "\nDate range:\n";
+    echo "  1) Use profile default\n";
+    echo "  2) Custom range\n";
+    $dateChoice = ask('Choose [1-2]', '1', static function (string $input) {
+        return in_array($input, ['1', '2'], true);
+    });
+
+    $start = null;
+    $end = null;
+    $dateIsDefault = $dateChoice === '1';
+    if ($dateChoice === '2') {
+        while (true) {
+            $startInput = ask('Start date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)', null, static function (string $input) {
+                return normalizeWizardDate($input, false) !== null;
+            });
+            $endInput = ask('End date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS, blank for now)', null, static function (string $input) {
+                return $input === '' || normalizeWizardDate($input, true) !== null;
+            });
+
+            $start = normalizeWizardDate($startInput, false);
+            $end = $endInput === '' ? date('Y-m-d H:i:s') : normalizeWizardDate($endInput, true);
+
+            if ($start !== null && $end !== null && strtotime($end) > strtotime($start)) {
+                $opts['start'] = $start;
+                $opts['end'] = $end;
+                break;
+            }
+
+            echo "End date must be after start date.\n";
+        }
+    }
+
+    echo "\nTrunks:\n";
+    echo "  1) Use configured FreePBX trunks (recommended)\n";
+    echo "  2) Specify trunks explicitly\n";
+    echo "  3) Use CDR-only fake trunks\n";
+    $trunkChoice = ask('Choose [1-3]', '1', static function (string $input) {
+        return in_array($input, ['1', '2', '3'], true);
+    });
+
+    $trunkSummary = 'configured FreePBX trunks';
+    if ($trunkChoice === '2') {
+        $trunks = ask('Enter trunks (comma-separated, e.g. PJSIP/main,SIP/backup)', null, static function (string $input) {
+            return trim($input) !== '';
+        });
+        $opts['trunks'] = $trunks;
+        $trunkSummary = $trunks;
+    } elseif ($trunkChoice === '3') {
+        $fakeTrunks = ask('How many fake trunks?', '4', static function (string $input) {
+            return ctype_digit($input) && (int)$input > 0;
+        });
+        $opts['fake-trunks'] = $fakeTrunks;
+        $trunkSummary = "{$fakeTrunks} CDR-only fake trunks";
+    }
+
+    $seed = $seedWasRandom ? random_int(1, 0x7fffffff) : (int)$seedInput;
+    $opts['seed'] = (string)$seed;
+
+    $cfg = $profiles[$profile];
+    $summaryEnd = $end ?? date('Y-m-d H:i:s');
+    $summaryStart = $start ?? date('Y-m-d H:i:s', strtotime($summaryEnd) - ($cfg['days'] * 86400));
+
+    echo "\nAbout to generate:\n";
+    echo "  Profile:  {$profile}\n";
+    echo "  Rows:     {$cfg['rows']} (profile default)\n";
+    echo "  Date:     {$summaryStart} to {$summaryEnd}" . ($dateIsDefault ? ' (profile default)' : '') . "\n";
+    echo "  Seed:     {$seed}" . ($seedWasRandom ? ' (random)' : '') . "\n";
+    echo "  Trunks:   {$trunkSummary}\n\n";
+
+    while (true) {
+        echo "Proceed? [Y/n]:\n> ";
+        $answer = strtolower(trim(readStdinOrExit()));
+        if ($answer === '' || $answer === 'y' || $answer === 'yes') {
+            return $opts;
+        }
+
+        if ($answer === 'n' || $answer === 'no') {
+            echo "Cancelled.\n";
+            exit(1);
+        }
+
+        echo "Please answer y or n.\n";
+    }
+}
+
+function ask(string $prompt, ?string $default = null, ?callable $validator = null): string
+{
+    while (true) {
+        $hint = $default !== null ? " (default: {$default})" : '';
+        echo "{$prompt}{$hint}:\n> ";
+        $input = trim(readStdinOrExit());
+        if ($input === '' && $default !== null) {
+            return $default;
+        }
+        if ($validator === null) {
+            return $input;
+        }
+        $result = $validator($input);
+        if ($result !== false) {
+            return is_string($result) ? $result : $input;
+        }
+
+        echo "Invalid input. Please try again.\n";
+    }
+}
+
+function readStdinOrExit(): string
+{
+    $line = fgets(STDIN);
+    if ($line === false) {
+        echo "\nCancelled.\n";
+        exit(1);
+    }
+
+    return $line;
+}
+
+function matchProfile(string $input): ?string
+{
+    $input = strtolower(trim($input));
+    if ($input === '') {
+        return null;
+    }
+
+    foreach (['light', 'medium', 'heavy'] as $profile) {
+        if (strpos($profile, $input) === 0) {
+            return $profile;
+        }
+    }
+
+    return null;
+}
+
+function normalizeWizardDate(string $input, bool $isEnd): ?string
+{
+    $input = trim($input);
+    if ($input === '') {
+        return null;
+    }
+
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $input) === 1) {
+        $input .= $isEnd ? ' 23:59:59' : ' 00:00:00';
+    }
+
+    $ts = strtotime($input);
+    if ($ts === false || $ts > time()) {
+        return null;
+    }
+
+    return date('Y-m-d H:i:s', $ts);
 }
 
 function promptCleanup(PDO $pdo, string $accountcode): void
