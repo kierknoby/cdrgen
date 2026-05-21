@@ -2,7 +2,7 @@
 <?php
 
 /**
- * CDRgen
+ * cdrgen
  *
  * Synthetic realistic CDR generator for FreePBX/Asterisk systems.
  */
@@ -132,7 +132,7 @@ $coverageRows = [
     ['outbound', 'NO ANSWER'],
 ];
 
-echo "CDRgen\n";
+echo "cdrgen\n";
 echo "======\n";
 echo "Profile: {$profile}\n";
 echo "Rows: {$rows}\n";
@@ -222,7 +222,7 @@ function runWizard(): array
 {
     global $profiles;
 
-    echo "CDRgen interactive wizard\n";
+    echo "cdrgen interactive wizard\n";
     echo "=========================\n\n";
 
     $opts = [];
