@@ -1256,40 +1256,40 @@ function generateCdrRow(
 function addExpectedCall(array &$expected, array $row): void
 {
     $start = (int)$row['_answer_ts'];
-    $end = (int)$row['_end_ts'];
+    $end = min((int)$row['_end_ts'], $start + 86400);
 
-    if ($end <= $start) {
+    if ($end < $start) {
         return;
     }
 
-    addEvent($expected['global'], $start, 1);
-    addEvent($expected['global'], $end, -1);
-    foreach ($row['_extensions'] as $extension) {
-        if (!isset($expected['extensions'][$extension])) {
-            $expected['extensions'][$extension] = [];
+    for ($ts = $start; $ts <= $end; $ts++) {
+        incrementSecond($expected['global'], $ts);
+
+        foreach ($row['_extensions'] as $extension) {
+            if (!isset($expected['extensions'][$extension])) {
+                $expected['extensions'][$extension] = [];
+            }
+
+            incrementSecond($expected['extensions'][$extension], $ts);
         }
 
-        addEvent($expected['extensions'][$extension], $start, 1);
-        addEvent($expected['extensions'][$extension], $end, -1);
-    }
+        if ($row['_trunk'] !== null) {
+            if (!isset($expected['trunks'][$row['_trunk']])) {
+                $expected['trunks'][$row['_trunk']] = [];
+            }
 
-    if ($row['_trunk'] !== null) {
-        if (!isset($expected['trunks'][$row['_trunk']])) {
-            $expected['trunks'][$row['_trunk']] = [];
+            incrementSecond($expected['trunks'][$row['_trunk']], $ts);
         }
-
-        addEvent($expected['trunks'][$row['_trunk']], $start, 1);
-        addEvent($expected['trunks'][$row['_trunk']], $end, -1);
     }
 }
 
-function addEvent(array &$events, int $ts, int $delta): void
+function incrementSecond(array &$secondsMap, int $ts): void
 {
-    if (!isset($events[$ts])) {
-        $events[$ts] = 0;
+    if (!isset($secondsMap[$ts])) {
+        $secondsMap[$ts] = 0;
     }
 
-    $events[$ts] += $delta;
+    $secondsMap[$ts]++;
 }
 
 function incrementStat(array &$stats, string $name): void
@@ -1348,20 +1348,13 @@ function printPeakMap(array $eventMap): void
     }
 }
 
-function peakConcurrency(array $events): int
+function peakConcurrency(array $secondsMap): int
 {
-    ksort($events, SORT_NUMERIC);
-    $current = 0;
-    $peak = 0;
-
-    foreach ($events as $delta) {
-        $current += $delta;
-        if ($current > $peak) {
-            $peak = $current;
-        }
+    if ($secondsMap === []) {
+        return 0;
     }
 
-    return $peak;
+    return max($secondsMap);
 }
 
 function weightedChoice(array $weights): string

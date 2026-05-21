@@ -158,6 +158,14 @@ After insertion, cdrgen prints:
 
 Non-answered calls are inserted into CDR but excluded from expected concurrency calculations.
 
+## Algorithm Notes
+
+Expected concurrency uses answered-only per-second occupancy with inclusive endpoints. A call active from `t_start` through `t_end` increments the occupancy counter for every second in `[t_start, t_end]`, and the peak is the maximum value across all occupied seconds.
+
+This matches the bash `concurrency-count` CLI tool, concurrencycount's `Original` engine, FreePBX CDR Reports' historical concurrent-calls implementation, and Asterisk-style runtime channel counting. A call ending at second `200` and another call starting at second `200` both count at second `200`.
+
+Per-call contribution to the expected seconds map is clamped to 86,400 seconds, or 24 hours, to protect against bogus long-duration CDR rows.
+
 ## Cleanup
 
 Each run uses a unique account code:
