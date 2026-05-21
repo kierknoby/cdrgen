@@ -169,6 +169,8 @@ This matches the bash `concurrency-count` CLI tool, concurrencycount's `Original
 
 Per-call contribution to the expected seconds map is clamped to 86,400 seconds, or 24 hours, to protect against bogus long-duration CDR rows.
 
+For large datasets, cdrgen calculates expected peaks in time batches. Each batch still walks every active second inclusively; batching only limits memory use while preserving the same counting semantics.
+
 ## Cleanup
 
 Each run uses a unique account code:

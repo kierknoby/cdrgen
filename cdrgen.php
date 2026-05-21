@@ -13,6 +13,8 @@ if (PHP_SAPI !== 'cli') {
 }
 
 const ACCOUNT_PREFIX = 'CCTEST';
+const EXPECTED_MAX_CALL_SECONDS = 86400;
+const EXPECTED_CHUNK_SECONDS = 3600;
 
 $profiles = [
     'light'  => ['rows' => 250,   'days' => 1,  'min' => 15, 'max' => 720],
@@ -1446,7 +1448,7 @@ function addExpectedCall(array &$expected, array $row): void
     }
 
     $start = (int)$row['_answer_ts'];
-    $end = min((int)$row['_end_ts'], $start + 86400);
+    $end = min((int)$row['_end_ts'], $start + EXPECTED_MAX_CALL_SECONDS);
     $handledExtension = handledPjsipExtension($row);
     $visibleExtensions = visiblePjsipExtensions($row);
 
@@ -1454,33 +1456,36 @@ function addExpectedCall(array &$expected, array $row): void
         return;
     }
 
-    for ($ts = $start; $ts <= $end; $ts++) {
-        incrementSecond($expected['global'], $ts);
+    addExpectedInterval($expected['global'], $start, $end);
 
-        if ($handledExtension !== null) {
-            if (!isset($expected['extensions_handled'][$handledExtension])) {
-                $expected['extensions_handled'][$handledExtension] = [];
-            }
-
-            incrementSecond($expected['extensions_handled'][$handledExtension], $ts);
+    if ($handledExtension !== null) {
+        if (!isset($expected['extensions_handled'][$handledExtension])) {
+            $expected['extensions_handled'][$handledExtension] = [];
         }
 
-        foreach ($visibleExtensions as $extension) {
-            if (!isset($expected['extensions_channel'][$extension])) {
-                $expected['extensions_channel'][$extension] = [];
-            }
-
-            incrementSecond($expected['extensions_channel'][$extension], $ts);
-        }
-
-        if ($row['_trunk'] !== null) {
-            if (!isset($expected['trunks'][$row['_trunk']])) {
-                $expected['trunks'][$row['_trunk']] = [];
-            }
-
-            incrementSecond($expected['trunks'][$row['_trunk']], $ts);
-        }
+        addExpectedInterval($expected['extensions_handled'][$handledExtension], $start, $end);
     }
+
+    foreach ($visibleExtensions as $extension) {
+        if (!isset($expected['extensions_channel'][$extension])) {
+            $expected['extensions_channel'][$extension] = [];
+        }
+
+        addExpectedInterval($expected['extensions_channel'][$extension], $start, $end);
+    }
+
+    if ($row['_trunk'] !== null) {
+        if (!isset($expected['trunks'][$row['_trunk']])) {
+            $expected['trunks'][$row['_trunk']] = [];
+        }
+
+        addExpectedInterval($expected['trunks'][$row['_trunk']], $start, $end);
+    }
+}
+
+function addExpectedInterval(array &$intervals, int $start, int $end): void
+{
+    $intervals[] = [$start, $end];
 }
 
 function handledPjsipExtension(array $row): ?string
@@ -1584,22 +1589,60 @@ function printExpected(array $expected): void
     printPeakMap($expected['trunks']);
 }
 
-function printPeakMap(array $eventMap): void
+function printPeakMap(array $intervalMap): void
 {
-    ksort($eventMap);
+    ksort($intervalMap);
 
-    foreach ($eventMap as $name => $events) {
-        echo "  {$name}: " . peakConcurrency($events) . "\n";
+    foreach ($intervalMap as $name => $intervals) {
+        echo "  {$name}: " . peakConcurrency($intervals) . "\n";
     }
 }
 
-function peakConcurrency(array $secondsMap): int
+function peakConcurrency(array $intervals): int
 {
-    if ($secondsMap === []) {
+    if ($intervals === []) {
         return 0;
     }
 
-    return max($secondsMap);
+    $min = null;
+    $max = null;
+
+    foreach ($intervals as $interval) {
+        $start = (int)$interval[0];
+        $end = (int)$interval[1];
+        $min = $min === null ? $start : min($min, $start);
+        $max = $max === null ? $end : max($max, $end);
+    }
+
+    if ($min === null || $max === null) {
+        return 0;
+    }
+
+    $peak = 0;
+    $firstChunk = $min - ($min % EXPECTED_CHUNK_SECONDS);
+
+    for ($chunkStart = $firstChunk; $chunkStart <= $max; $chunkStart += EXPECTED_CHUNK_SECONDS) {
+        $chunkEnd = min($chunkStart + EXPECTED_CHUNK_SECONDS - 1, $max);
+        $secondsMap = [];
+
+        foreach ($intervals as $interval) {
+            $from = max((int)$interval[0], $chunkStart);
+            $to = min((int)$interval[1], $chunkEnd);
+
+            if ($to < $from) {
+                continue;
+            }
+
+            for ($ts = $from; $ts <= $to; $ts++) {
+                incrementSecond($secondsMap, $ts);
+                if ($secondsMap[$ts] > $peak) {
+                    $peak = $secondsMap[$ts];
+                }
+            }
+        }
+    }
+
+    return $peak;
 }
 
 function weightedChoice(array $weights): string
