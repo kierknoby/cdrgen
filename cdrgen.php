@@ -460,14 +460,8 @@ function buildTrunkProfiles(PDO $pdo, string $customTrunks, int $fakeTrunks): ar
 
     $profiles = loadConfiguredTrunkProfiles($pdo);
 
-    if ($profiles === []) {
-        $profiles = [
-            inferredTrunkProfile('PJSIP/flowroute-main', ['2125550100', '2125550101'], ['1212', '1646', '1718', '1800'], 0, 'main primary'),
-            inferredTrunkProfile('PJSIP/twilio-elastic', ['6465550110', '6465550111'], ['1646', '1415', '1617', '1888'], 1, 'elastic'),
-            inferredTrunkProfile('SIP/voipms-nyc', ['7185550199', '7185550198'], ['1718', '1202', '1303'], 2, 'outbound lcr'),
-            inferredTrunkProfile('PJSIP/bandwidth-tollfree', ['8005550180', '8885550181'], ['1800', '1888'], 3, 'tollfree inbound'),
-            inferredTrunkProfile('SIP/backup-carrier', ['2125550190'], ['1212', '1646', '1718'], 4, 'backup failover'),
-        ];
+    if ($profiles === [] && $fakeTrunks < 1) {
+        $profiles = promptForConfiguredTrunks($pdo);
     }
 
     $names = ['peerless-west', 'bulkvs-ld', 'inteliquent-overflow', 'telnyx-backup', 'questblue-lcr', 'thinQ-failover'];
@@ -484,6 +478,46 @@ function buildTrunkProfiles(PDO $pdo, string $customTrunks, int $fakeTrunks): ar
     }
 
     return $profiles;
+}
+
+function promptForConfiguredTrunks(PDO $pdo): array
+{
+    while (true) {
+        echo "\nNo configured FreePBX trunks were detected.\n";
+        echo "Create harmless enabled test trunks in FreePBX before generating CDR data.\n";
+        echo "Suggested names: Primary-In, Primary-Out, Failover-Test.\n";
+        echo "A dummy SIP server such as test.test.com is fine; the trunks do not need to register.\n";
+        echo "Disabled trunks may be hidden from reports and skipped by automatic discovery.\n";
+        echo "\nPress ENTER after creating trunks to retry detection, type FAKE to use CDR-only fake trunks, or QUIT to exit: ";
+
+        $line = fgets(STDIN);
+        if ($line === false) {
+            fwrite(STDERR, "\nSTDIN closed and no trunks were detected; exiting before generating rows.\n");
+            exit(1);
+        }
+
+        $answer = strtoupper(trim($line));
+        if ($answer === 'QUIT' || $answer === 'EXIT') {
+            echo "No rows generated.\n";
+            exit(1);
+        }
+
+        if ($answer === 'FAKE') {
+            echo "Using explicit CDR-only fake trunks. These may not appear in reports that require configured FreePBX trunks.\n";
+            return [
+                inferredTrunkProfile('PJSIP/flowroute-main', ['2125550100', '2125550101'], ['1212', '1646', '1718', '1800'], 0, 'main primary'),
+                inferredTrunkProfile('PJSIP/twilio-elastic', ['6465550110', '6465550111'], ['1646', '1415', '1617', '1888'], 1, 'elastic'),
+                inferredTrunkProfile('SIP/backup-carrier', ['2125550190'], ['1212', '1646', '1718'], 2, 'backup failover'),
+            ];
+        }
+
+        $profiles = loadConfiguredTrunkProfiles($pdo);
+        if ($profiles !== []) {
+            return $profiles;
+        }
+
+        echo "Still no configured trunks detected.\n";
+    }
 }
 
 function loadConfiguredTrunkProfiles(PDO $pdo): array
