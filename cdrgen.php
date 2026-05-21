@@ -1,3 +1,4 @@
+#!/usr/bin/env php
 <?php
 
 /**
@@ -204,7 +205,11 @@ promptCleanup($pdo, $accountcode);
 function usage(int $exitCode): void
 {
     $script = basename(__FILE__);
-    echo "Usage: php {$script} --profile=light|medium|heavy [--seed=N] [--rows=N] [--start=DATE] [--end=DATE] [--trunks=LIST] [--fake-trunks=N]\n";
+    if ($script === 'cdrgen.php') {
+        $script = 'cdrgen';
+    }
+
+    echo "Usage: {$script} --profile=light|medium|heavy [--seed=N] [--rows=N] [--start=DATE] [--end=DATE] [--trunks=LIST] [--fake-trunks=N]\n";
     echo "Dates are parsed by PHP strtotime(), for example: 2026-05-01 00:00:00\n";
     echo "Trunks are comma-separated channel names, for example: PJSIP/primary,SIP/backup\n";
     exit($exitCode);

@@ -36,24 +36,46 @@ cdrgen inserts tagged, realistic mixed telephony traffic into `asteriskcdrdb.cdr
 
 ## Installation
 
+Clone the repository:
+
 ```bash
-git clone https://github.com/kierknoby/cdrgen.git
+git clone https://github.com/kierknoby/cdrgen.git ~/cdrgen
+```
+
+For the recommended setup, make cdrgen invokable as a system command:
+
+```bash
+chmod +x ~/cdrgen/cdrgen.php
+sudo ln -sf ~/cdrgen/cdrgen.php /usr/local/bin/cdrgen
+```
+
+Now you can run cdrgen from anywhere:
+
+```bash
+cdrgen
+cdrgen --profile=medium --seed=202
 ```
 
 Run it on the FreePBX/Asterisk system as a user that can read `/etc/freepbx.conf` and write to the CDR database.
 
+If you prefer not to install system-wide, invoke the script directly:
+
+```bash
+php ~/cdrgen/cdrgen.php
+```
+
 ## Usage
 
 ```bash
-php ~/cdrgen/cdrgen.php --profile=light
+cdrgen --profile=light
 ```
 
 ```bash
-php ~/cdrgen/cdrgen.php --profile=medium --seed=202
+cdrgen --profile=medium --seed=202
 ```
 
 ```bash
-php ~/cdrgen/cdrgen.php --profile=heavy --seed=303
+cdrgen --profile=heavy --seed=303
 ```
 
 ## Interactive Mode
@@ -61,7 +83,7 @@ php ~/cdrgen/cdrgen.php --profile=heavy --seed=303
 Run without arguments for an interactive wizard:
 
 ```bash
-php ~/cdrgen/cdrgen.php
+cdrgen
 ```
 
 The wizard prompts for profile, seed, date range, and trunk options, then runs the same generation as the CLI flags.
@@ -69,7 +91,7 @@ The wizard prompts for profile, seed, date range, and trunk options, then runs t
 With explicit row and date range:
 
 ```bash
-php ~/cdrgen/cdrgen.php --profile=medium --rows=5000 --start="2026-05-01 00:00:00" --end="2026-05-08 00:00:00" --seed=202
+cdrgen --profile=medium --rows=5000 --start="2026-05-01 00:00:00" --end="2026-05-08 00:00:00" --seed=202
 ```
 
 ## Options
@@ -110,7 +132,7 @@ Using a dummy SIP server such as `test.test.com` is fine. The generator only nee
 Important: if you disable the trunk in FreePBX, some reports may hide it and cdrgen may skip it during automatic trunk discovery. For best results, leave the test trunk enabled but pointed at a non-real SIP server. If you intentionally keep it disabled, force it with `--trunks`:
 
 ```bash
-php ~/cdrgen/cdrgen.php --profile=light --trunks=PJSIP/Primary-In,PJSIP/Primary-Out,PJSIP/Failover-Test
+cdrgen --profile=light --trunks=PJSIP/Primary-In,PJSIP/Primary-Out,PJSIP/Failover-Test
 ```
 
 Expected behavior:
@@ -122,13 +144,13 @@ Expected behavior:
 You can force specific trunks:
 
 ```bash
-php ~/cdrgen/cdrgen.php --profile=light --trunks=PJSIP/main-out,SIP/backup-failover
+cdrgen --profile=light --trunks=PJSIP/main-out,SIP/backup-failover
 ```
 
 You can also add CDR-visible fake trunks explicitly:
 
 ```bash
-php ~/cdrgen/cdrgen.php --profile=medium --fake-trunks=4
+cdrgen --profile=medium --fake-trunks=4
 ```
 
 Fake trunks are only represented in CDR rows. They do not create FreePBX trunk configuration. Reports that require configured trunks may not show fake trunk names unless those trunks also exist in FreePBX. cdrgen no longer silently falls back to fake trunks when no configured trunks are detected.
