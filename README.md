@@ -29,6 +29,18 @@ cdrgen inserts synthetic CDR rows into `asteriskcdrdb.cdr` tagged with a unique 
 
 cdrgen writes synthetic rows tagged with `CCTESTxxxxxxxx`. Treat it as a test-PBX tool. Use the printed cleanup SQL, or type DELETE at the cleanup prompt, to remove the rows when finished.
 
+## What cdrgen reports
+
+cdrgen reports concurrency three ways:
+
+- **Global peak**: how busy the PBX was overall.
+- **Per-trunk peak**: how busy each SIP trunk was. Internal calls do not touch trunks and do not count here.
+- **Per-extension peak**, in two flavours:
+  - **Handled-call peak**: how many calls each user was dealing with. An internal call counts once, against the called party.
+  - **Channel-leg peak**: how many channels were open against each extension. An internal call counts on both ends.
+
+These answer different questions. Group is for sizing the PBX. Trunk is for sizing SIP capacity. Extension handled-call is for understanding user workload. Extension channel-leg is for understanding raw channel occupancy per endpoint.
+
 ## Usage
 
 ```bash
