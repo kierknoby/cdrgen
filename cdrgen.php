@@ -772,11 +772,19 @@ function addExpectedCall(array &$expected, array $row): void
     addEvent($expected['global'], $start, 1);
     addEvent($expected['global'], $end, -1);
     foreach ($row['_extensions'] as $extension) {
+        if (!isset($expected['extensions'][$extension])) {
+            $expected['extensions'][$extension] = [];
+        }
+
         addEvent($expected['extensions'][$extension], $start, 1);
         addEvent($expected['extensions'][$extension], $end, -1);
     }
 
     if ($row['_trunk'] !== null) {
+        if (!isset($expected['trunks'][$row['_trunk']])) {
+            $expected['trunks'][$row['_trunk']] = [];
+        }
+
         addEvent($expected['trunks'][$row['_trunk']], $start, 1);
         addEvent($expected['trunks'][$row['_trunk']], $end, -1);
     }
