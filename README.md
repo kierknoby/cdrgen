@@ -4,57 +4,30 @@ Synthetic realistic CDR generator for FreePBX/Asterisk concurrency testing and v
 
 cdrgen inserts tagged, realistic mixed telephony traffic into `asteriskcdrdb.cdr` so tools such as `concurrencycount`, CDR Reports concurrent calls, and SQL-based reporting engines can be tested against known synthetic datasets.
 
-## Features
+Only answered PJSIP calls (`disposition = 'ANSWERED'`) contribute to the expected concurrency calculation. A ringing or failed call is not a concurrent call. Non-answered calls are still inserted into CDR for traffic-mix realism.
 
-- FreePBX/Asterisk-compatible PHP CLI script
-- Loads `/etc/freepbx.conf`
-- Inserts into `asteriskcdrdb.cdr`
-- Uses PDO prepared statements
-- Dynamically adapts to the installed CDR schema with `SHOW COLUMNS FROM cdr`
-- Deterministic generation with `--seed`
-- Light, medium, and heavy profiles
-- Optional row and date range overrides
-- Realistic mixed traffic:
-  - inbound, outbound, and internal extension calls
-  - direct extension, ring-group-like, queue-like, and IVR-like inbound paths
-  - trunk and endpoint channels
-  - `ANSWERED`, `NO ANSWER`, `BUSY`, and `FAILED`
-  - business-hour weighting, after-hours traffic, and burst clustering
-- Trunk-aware generation:
-  - prefers configured FreePBX trunks when available
-  - supports explicit custom trunks
-  - supports CDR-visible fake trunks
-  - prompts before generation if no configured trunks are found
-  - infers trunk behavior from exact and fuzzy name matching
-- Calculates expected answered-only concurrency:
-  - global peak
-  - per-extension peak
-  - per-trunk peak
-- Tags generated rows with `accountcode = CCTESTxxxxxxxx`
-- Prints cleanup SQL
-- Keeps the CLI alive with a repeating cleanup prompt every 60 seconds
-
-## Installation
+## Quick Start
 
 ```bash
 git clone https://github.com/kierknoby/cdrgen.git ~/cdrgen
 sudo ~/cdrgen/install.sh
 ```
 
-That's it. cdrgen is now available system-wide:
+cdrgen is now available system-wide. Use Interactive Mode for the wizard, or Usage for direct command examples.
 
-```bash
-cdrgen
-cdrgen --profile=medium --seed=202
-```
-
-Run it on the FreePBX/Asterisk system as a user that can read `/etc/freepbx.conf` and write to the CDR database.
+Run cdrgen on the FreePBX/Asterisk system as a user that can read `/etc/freepbx.conf` and write to the CDR database.
 
 If you prefer not to install system-wide, invoke the script directly:
 
 ```bash
 php ~/cdrgen/cdrgen.php
 ```
+
+## How it Works
+
+cdrgen inserts synthetic CDR rows into `asteriskcdrdb.cdr` tagged with a unique `accountcode` (`CCTESTxxxxxxxx`). After insertion it prints the expected answered-only concurrency peaks calculated independently from the generated data, so you can compare them to whatever report you're testing.
+
+cdrgen writes synthetic rows tagged with `CCTESTxxxxxxxx`. Treat it as a test-PBX tool. Use the printed cleanup SQL, or type DELETE at the cleanup prompt, to remove the rows when finished.
 
 ## Usage
 
@@ -70,6 +43,12 @@ cdrgen --profile=medium --seed=202
 cdrgen --profile=heavy --seed=303
 ```
 
+With explicit row count and date range:
+
+```bash
+cdrgen --profile=medium --rows=5000 --start="2026-05-01 00:00:00" --end="2026-05-08 00:00:00" --seed=202
+```
+
 ## Interactive Mode
 
 Run without arguments for an interactive wizard:
@@ -79,12 +58,6 @@ cdrgen
 ```
 
 The wizard prompts for profile, seed, date range, and trunk options, then runs the same generation as the CLI flags.
-
-With explicit row and date range:
-
-```bash
-cdrgen --profile=medium --rows=5000 --start="2026-05-01 00:00:00" --end="2026-05-08 00:00:00" --seed=202
-```
 
 ## Options
 
@@ -99,7 +72,7 @@ cdrgen --profile=medium --rows=5000 --start="2026-05-01 00:00:00" --end="2026-05
 --help
 ```
 
-Profiles provide default row counts and date ranges:
+## Profiles
 
 - `light`: 250 rows over 1 day
 - `medium`: 2500 rows over 7 days
@@ -219,3 +192,45 @@ Delete all generated rows:
 ```bash
 mysql asteriskcdrdb -e "DELETE FROM cdr WHERE accountcode LIKE 'CCTEST%';"
 ```
+
+## Features
+
+- FreePBX/Asterisk-compatible PHP CLI script
+- Loads `/etc/freepbx.conf`
+- Inserts into `asteriskcdrdb.cdr`
+- Uses PDO prepared statements
+- Dynamically adapts to the installed CDR schema with `SHOW COLUMNS FROM cdr`
+- Deterministic generation with `--seed`
+- Light, medium, and heavy profiles
+- Optional row and date range overrides
+- Realistic mixed traffic:
+  - inbound, outbound, and internal extension calls
+  - direct extension, ring-group-like, queue-like, and IVR-like inbound paths
+  - trunk and endpoint channels
+  - `ANSWERED`, `NO ANSWER`, `BUSY`, and `FAILED`
+  - business-hour weighting, after-hours traffic, and burst clustering
+- Trunk-aware generation:
+  - prefers configured FreePBX trunks when available
+  - supports explicit custom trunks
+  - supports CDR-visible fake trunks
+  - prompts before generation if no configured trunks are found
+  - infers trunk behavior from exact and fuzzy name matching
+- Calculates expected answered-only concurrency:
+  - global peak
+  - per-extension peak
+  - per-trunk peak
+- Tags generated rows with `accountcode = CCTESTxxxxxxxx`
+- Prints cleanup SQL
+- Keeps the CLI alive with a repeating cleanup prompt every 60 seconds
+
+## AI disclosure
+
+This tool has been developed with AI assistance for code generation, review, testing, and documentation. Changes should still be reviewed, tested, and accepted by a human maintainer before deployment.
+
+## Licence
+
+MIT. See LICENSE.
+
+## Author
+
+@kierknoby, Kieran Byrne // FreePBX UK
