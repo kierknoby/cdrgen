@@ -28,18 +28,24 @@ Designed for:
 - Tagged rows for safe cleanup
 - Interactive cleanup prompt
 
+## Installation
+
+```bash
+git clone https://github.com/kierknoby/cdrgen.git
+```
+
 ## Usage
 
 ```bash
-php cdrgen.php --profile=light
+php ~/cdrgen/cdrgen.php --profile=light
 ```
 
 ```bash
-php cdrgen.php --profile=medium --seed=202
+php ~/cdrgen/cdrgen.php --profile=medium --seed=202
 ```
 
 ```bash
-php cdrgen.php --profile=heavy --seed=303
+php ~/cdrgen/cdrgen.php --profile=heavy --seed=303
 ```
 
 ## Seed
