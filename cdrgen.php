@@ -58,6 +58,11 @@ mt_srand($seed);
 
 $accountcode = ACCOUNT_PREFIX . sprintf('%04x%04x', mt_rand(0, 0xffff), mt_rand(0, 0xffff));
 $pdo = connectCdrPdo($amp_conf ?? []);
+try {
+    $configPdo = connectConfigPdo($amp_conf ?? []);
+} catch (Throwable $e) {
+    $configPdo = $pdo;
+}
 $columns = loadCdrColumns($pdo);
 $insert = buildInsertStatement($pdo, $columns);
 
@@ -75,6 +80,7 @@ $extensionNames = [
     '2200' => 'Billing',
 ];
 $trunkProfiles = buildTrunkProfiles(
+    $configPdo,
     isset($opts['trunks']) ? (string)$opts['trunks'] : '',
     isset($opts['fake-trunks']) ? parsePositiveInt($opts['fake-trunks'], '--fake-trunks') : 0
 );
@@ -326,6 +332,26 @@ function connectCdrPdo(array $ampConf): PDO
     ]);
 }
 
+function connectConfigPdo(array $ampConf): PDO
+{
+    $host = $ampConf['AMPDBHOST'] ?? 'localhost';
+    $port = $ampConf['AMPDBPORT'] ?? null;
+    $name = $ampConf['AMPDBNAME'] ?? 'asterisk';
+    $user = $ampConf['AMPDBUSER'] ?? 'asteriskuser';
+    $pass = $ampConf['AMPDBPASS'] ?? '';
+
+    $dsn = "mysql:host={$host};dbname={$name};charset=utf8mb4";
+    if ($port !== null && $port !== '') {
+        $dsn .= ";port={$port}";
+    }
+
+    return new PDO($dsn, $user, $pass, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        PDO::ATTR_EMULATE_PREPARES => false,
+    ]);
+}
+
 function loadCdrColumns(PDO $pdo): array
 {
     $stmt = $pdo->prepare('SHOW COLUMNS FROM cdr');
@@ -407,7 +433,7 @@ function defaultColumnValue(string $column, array $meta)
     return '';
 }
 
-function buildTrunkProfiles(string $customTrunks, int $fakeTrunks): array
+function buildTrunkProfiles(PDO $pdo, string $customTrunks, int $fakeTrunks): array
 {
     if ($customTrunks !== '') {
         $profiles = [];
@@ -418,14 +444,12 @@ function buildTrunkProfiles(string $customTrunks, int $fakeTrunks): array
                 continue;
             }
 
-            $profiles[] = trunkProfile(
+            $profiles[] = inferredTrunkProfile(
                 $channel,
-                100 - min(75, $index * 15),
-                70,
-                30,
                 didPoolFor($index),
                 prefixPoolFor($index),
-                $index >= 2
+                $index,
+                $channel
             );
         }
 
@@ -434,30 +458,271 @@ function buildTrunkProfiles(string $customTrunks, int $fakeTrunks): array
         }
     }
 
-    $profiles = [
-        trunkProfile('PJSIP/flowroute-main', 42, 58, 42, ['2125550100', '2125550101'], ['1212', '1646', '1718', '1800'], false),
-        trunkProfile('PJSIP/twilio-elastic', 28, 44, 56, ['6465550110', '6465550111'], ['1646', '1415', '1617', '1888'], false),
-        trunkProfile('SIP/voipms-nyc', 18, 36, 64, ['7185550199', '7185550198'], ['1718', '1202', '1303'], false),
-        trunkProfile('PJSIP/bandwidth-tollfree', 9, 82, 18, ['8005550180', '8885550181'], ['1800', '1888'], false),
-        trunkProfile('SIP/backup-carrier', 3, 20, 80, ['2125550190'], ['1212', '1646', '1718'], true),
-    ];
+    $profiles = loadConfiguredTrunkProfiles($pdo);
+
+    if ($profiles === []) {
+        $profiles = [
+            inferredTrunkProfile('PJSIP/flowroute-main', ['2125550100', '2125550101'], ['1212', '1646', '1718', '1800'], 0, 'main primary'),
+            inferredTrunkProfile('PJSIP/twilio-elastic', ['6465550110', '6465550111'], ['1646', '1415', '1617', '1888'], 1, 'elastic'),
+            inferredTrunkProfile('SIP/voipms-nyc', ['7185550199', '7185550198'], ['1718', '1202', '1303'], 2, 'outbound lcr'),
+            inferredTrunkProfile('PJSIP/bandwidth-tollfree', ['8005550180', '8885550181'], ['1800', '1888'], 3, 'tollfree inbound'),
+            inferredTrunkProfile('SIP/backup-carrier', ['2125550190'], ['1212', '1646', '1718'], 4, 'backup failover'),
+        ];
+    }
 
     $names = ['peerless-west', 'bulkvs-ld', 'inteliquent-overflow', 'telnyx-backup', 'questblue-lcr', 'thinQ-failover'];
     for ($i = 0; $i < $fakeTrunks; $i++) {
         $tech = $i % 3 === 0 ? 'SIP' : 'PJSIP';
         $name = $names[$i % count($names)] . '-' . ($i + 1);
-        $profiles[] = trunkProfile(
+        $profiles[] = inferredTrunkProfile(
             "{$tech}/{$name}",
-            max(2, 16 - $i),
-            mt_rand(25, 65),
-            mt_rand(35, 75),
             didPoolFor($i + 10),
             prefixPoolFor($i + 10),
-            true
+            $i + 10,
+            $name
         );
     }
 
     return $profiles;
+}
+
+function loadConfiguredTrunkProfiles(PDO $pdo): array
+{
+    try {
+        $stmt = $pdo->prepare(
+            'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table'
+        );
+        $stmt->execute([':table' => 'trunks']);
+        if ($stmt->fetchColumn() === false) {
+            return [];
+        }
+
+        $columns = [];
+        $stmt = $pdo->prepare('SHOW COLUMNS FROM trunks');
+        $stmt->execute();
+        foreach ($stmt->fetchAll() as $column) {
+            $columns[$column['Field']] = true;
+        }
+
+        $select = [];
+        foreach (['trunkid', 'tech', 'channelid', 'name', 'disabled'] as $field) {
+            if (isset($columns[$field])) {
+                $select[] = "`{$field}`";
+            }
+        }
+
+        if ($select === [] || !isset($columns['channelid'])) {
+            return [];
+        }
+
+        $sql = 'SELECT ' . implode(', ', $select) . ' FROM trunks';
+        if (isset($columns['disabled'])) {
+            $sql .= " WHERE disabled IN ('off', 'false', '0', '') OR disabled IS NULL";
+        }
+        if (isset($columns['trunkid'])) {
+            $sql .= ' ORDER BY trunkid';
+        }
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute();
+        $profiles = [];
+        $index = 0;
+
+        foreach ($stmt->fetchAll() as $row) {
+            $channel = configuredTrunkChannel($row);
+            if ($channel === '') {
+                continue;
+            }
+
+            $profiles[] = inferredTrunkProfile(
+                $channel,
+                didPoolFor($index),
+                prefixPoolFor($index),
+                $index,
+                trim((string)($row['name'] ?? '')) . ' ' . $channel
+            );
+            $index++;
+        }
+
+        return $profiles;
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function configuredTrunkChannel(array $row): string
+{
+    $channelid = trim((string)($row['channelid'] ?? ''));
+    if ($channelid === '') {
+        return '';
+    }
+
+    if (strpos($channelid, '/') !== false) {
+        return normalizeTrunkChannel($channelid);
+    }
+
+    $tech = strtolower(trim((string)($row['tech'] ?? '')));
+    if ($tech === 'pjsip') {
+        return "PJSIP/{$channelid}";
+    }
+
+    if ($tech === 'sip') {
+        return "SIP/{$channelid}";
+    }
+
+    if ($tech === 'iax2') {
+        return "IAX2/{$channelid}";
+    }
+
+    return "PJSIP/{$channelid}";
+}
+
+function inferredTrunkProfile(string $channel, array $dids, array $prefixes, int $index, string $label): array
+{
+    $traits = inferTrunkTraits($label . ' ' . $channel);
+    $weight = max(2, 80 - ($index * 10));
+    $inboundWeight = mt_rand(38, 66);
+    $outboundWeight = mt_rand(38, 66);
+    $degraded = $index >= 3;
+
+    if ($traits['primary']) {
+        $weight += 28;
+        $inboundWeight += 12;
+        $outboundWeight += 12;
+        $degraded = false;
+    }
+
+    if ($traits['secondary']) {
+        $weight = max(10, (int)floor($weight * 0.65));
+        $inboundWeight = max(12, $inboundWeight - 14);
+        $outboundWeight = max(12, $outboundWeight - 14);
+    }
+
+    if ($traits['backup']) {
+        $weight = max(3, (int)floor($weight * 0.25));
+        $inboundWeight = max(8, (int)floor($inboundWeight * 0.45));
+        $outboundWeight = max(12, (int)floor($outboundWeight * 0.60));
+        $degraded = true;
+    }
+
+    if ($traits['inbound']) {
+        $inboundWeight += 45;
+        $outboundWeight = max(6, (int)floor($outboundWeight * 0.35));
+    }
+
+    if ($traits['outbound']) {
+        $outboundWeight += 45;
+        $inboundWeight = max(6, (int)floor($inboundWeight * 0.35));
+    }
+
+    if ($traits['tollfree']) {
+        $inboundWeight += 55;
+        $outboundWeight = max(6, (int)floor($outboundWeight * 0.30));
+        $prefixes = ['1800', '1888', '1877', '1866'];
+    }
+
+    if ($traits['international']) {
+        $outboundWeight += 32;
+        $prefixes = ['01144', '01149', '01161', '01133'];
+    }
+
+    if ($traits['fax']) {
+        $weight = max(2, (int)floor($weight * 0.30));
+        $inboundWeight += 18;
+        $outboundWeight += 10;
+    }
+
+    if ($traits['emergency']) {
+        $weight = max(1, (int)floor($weight * 0.10));
+        $outboundWeight += 12;
+    }
+
+    return trunkProfile(
+        $channel,
+        $weight,
+        $inboundWeight,
+        $outboundWeight,
+        $dids,
+        $prefixes,
+        $degraded
+    );
+}
+
+function inferTrunkTraits(string $value): array
+{
+    $text = strtolower($value);
+    $tokens = preg_split('/[^a-z0-9]+/', $text, -1, PREG_SPLIT_NO_EMPTY);
+    $tokens = $tokens === false ? [] : $tokens;
+    $compact = implode('', $tokens);
+    $scores = [
+        'inbound' => traitScore($tokens, $compact, ['in', 'inb', 'inbound', 'incoming', 'ingress', 'did', 'dids', 'ddi', 'recv', 'receive', 'rx', 'orig', 'origination']),
+        'outbound' => traitScore($tokens, $compact, ['out', 'outb', 'outbound', 'outgoing', 'egress', 'send', 'tx', 'term', 'terminate', 'termination']),
+        'primary' => traitScore($tokens, $compact, ['primary', 'pri', 'main', 'default', 'prod', 'production', 'active', 'preferred', 'prefered', 'first', 'one', 'a']),
+        'secondary' => traitScore($tokens, $compact, ['secondary', 'second', 'alt', 'alternate', 'alternative', 'overflow', 'spare', 'standby', 'two', 'b']),
+        'backup' => traitScore($tokens, $compact, ['backup', 'back', 'bak', 'bkp', 'failover', 'fail-over', 'failsafe', 'standby', 'redundant', 'redundancy', 'dr', 'disasterrecovery']),
+        'tollfree' => traitScore($tokens, $compact, ['tollfree', 'toll-free', 'tf', 'freephone', '800', '888', '877', '866', '855', '844', '833']),
+        'international' => traitScore($tokens, $compact, ['intl', 'international', 'global', 'world', 'ld', 'longdistance', 'long-distance', 'overseas']),
+        'fax' => traitScore($tokens, $compact, ['fax', 'facsimile', 't38', 't38fax']),
+        'emergency' => traitScore($tokens, $compact, ['emergency', 'e911', '911', 'psap']),
+    ];
+
+    return [
+        'inbound' => $scores['inbound'] >= 2 && $scores['inbound'] >= $scores['outbound'],
+        'outbound' => $scores['outbound'] >= 2 && $scores['outbound'] >= $scores['inbound'],
+        'primary' => $scores['primary'] >= 2 && $scores['primary'] >= $scores['secondary'] && $scores['primary'] >= $scores['backup'],
+        'secondary' => $scores['secondary'] >= 2 && $scores['secondary'] > $scores['primary'],
+        'backup' => $scores['backup'] >= 2,
+        'tollfree' => $scores['tollfree'] >= 2,
+        'international' => $scores['international'] >= 2,
+        'fax' => $scores['fax'] >= 2,
+        'emergency' => $scores['emergency'] >= 2,
+    ];
+}
+
+function traitScore(array $tokens, string $compact, array $needles): int
+{
+    $score = 0;
+
+    foreach ($needles as $needle) {
+        $normalizedNeedle = strtolower(preg_replace('/[^a-z0-9]+/', '', $needle));
+        if ($normalizedNeedle === '') {
+            continue;
+        }
+
+        foreach ($tokens as $token) {
+            $score += fuzzyTokenScore($token, $normalizedNeedle);
+        }
+
+        if (strlen($normalizedNeedle) >= 4 && strpos($compact, $normalizedNeedle) !== false) {
+            $score += 2;
+        }
+    }
+
+    return $score;
+}
+
+function fuzzyTokenScore(string $token, string $needle): int
+{
+    if ($token === $needle) {
+        return 4;
+    }
+
+    if (strlen($needle) >= 4 && (strpos($token, $needle) !== false || strpos($needle, $token) !== false)) {
+        return 2;
+    }
+
+    if (strlen($needle) >= 5 && strlen($token) >= 5) {
+        $distance = levenshtein($token, $needle);
+        if ($distance <= 1) {
+            return 3;
+        }
+
+        if ($distance <= 2) {
+            return 2;
+        }
+    }
+
+    return 0;
 }
 
 function trunkProfile(string $channel, int $weight, int $inboundWeight, int $outboundWeight, array $dids, array $prefixes, bool $degraded): array
