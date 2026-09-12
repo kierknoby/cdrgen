@@ -1,81 +1,57 @@
-# cdrgen
+# CDRgen
 
-Synthetic realistic CDR generator for FreePBX/Asterisk concurrency testing and validation.
+CDRgen is a realistic synthetic CDR workload generator for FreePBX/Asterisk report testing. The standalone command writes tagged rows to `asteriskcdrdb.cdr`; the reusable core generates complete logical CDRs entirely in memory and has no FreePBX or database dependency.
 
-Version: `1.0.0`
+Core version: `1.1.0-dev`. `CdrGen\Version::BASE_REVISION` records the reviewed upstream base (`f3dcc9f...`); `SOURCE_REVISION` remains `null` until a packager or importer can record an exact committed source revision. This is a test/validation utility, not a production CDR writer.
 
-Status: suitable for testing purposes only. Do not use in production.
+## Safety
 
-cdrgen inserts tagged, realistic mixed telephony traffic into `asteriskcdrdb.cdr` so tools such as `concurrencycount`, CDR Reports concurrent calls, and SQL-based reporting engines can be tested against known synthetic datasets.
+The normal CLI bootstraps FreePBX and inserts synthetic rows in a transaction. Every database run gets a cryptographically random 64-bit `CCTEST` suffix (for example, `CCTEST0123456789abcdef`). This is a strong practical identifier, not a mathematical uniqueness guarantee. The final prompt can delete only that exact accountcode; `KEEP` retains it. To remove one retained run:
 
-Only answered PJSIP calls (`disposition = 'ANSWERED'`) contribute to the expected concurrency calculation. A ringing or failed call is not a concurrent call. Non-answered calls are still inserted into CDR for traffic-mix realism.
-
-## Quick Start
-
-```bash
-git clone https://github.com/kierknoby/cdrgen.git ~/cdrgen
-sudo ~/cdrgen/install.sh
+```sql
+DELETE FROM cdr WHERE accountcode = 'CCTEST0123456789abcdef';
 ```
 
-cdrgen is now available system-wide. Use Interactive Mode for the wizard, or Usage for direct command examples.
+An interruption after commit but before cleanup leaves recognisably tagged rows. Find them with `WHERE accountcode LIKE 'CCTEST%'`, inspect them, and delete only the intended exact tag. CDRgen never alters the CDR schema. Use `--dry-run` for generation without FreePBX or database access.
 
-Run cdrgen on the FreePBX/Asterisk system as a user that can read `/etc/freepbx.conf` and write to the CDR database.
+CDRgen models realistic reporting data, not complete Asterisk signalling, CEL events, every multi-CDR topology, or every production dialplan application. Run it on a test PBX and review generated data before relying on a validation result.
 
-If you prefer not to install system-wide, invoke the script directly:
+## Traffic model
 
-```bash
-php ~/cdrgen/cdrgen.php
-```
+Profiles retain the established workload sizes:
 
-## How it Works
+| Profile | Rows | Range | Answered duration range |
+|---|---:|---:|---:|
+| Light | 250 | 1 day | 15–720 seconds |
+| Medium | 2,500 | 7 days | 15–1,200 seconds |
+| Heavy | 15,000 | 30 days | 15–2,400 seconds |
 
-cdrgen inserts synthetic CDR rows into `asteriskcdrdb.cdr` tagged with a unique `accountcode` (`CCTESTxxxxxxxx`). After insertion it prints the expected answered-only concurrency peaks calculated independently from the generated data, so you can compare them to whatever report you're testing.
+Generation models weekday/weekend demand, morning/lunch/afternoon/evening variations, minute-of-hour effects, rare traffic spikes, and burst clustering. Calls are inbound, outbound, or internal with time-sensitive direction and disposition probabilities. Dispositions are `ANSWERED`, `NO ANSWER`, `BUSY`, and `FAILED`; answered durations use short/medium/long classes and ring time, while unsuccessful calls are shorter with zero billsec.
 
-cdrgen writes synthetic rows tagged with `CCTESTxxxxxxxx`. Treat it as a test-PBX tool. Use the printed cleanup SQL, or type DELETE at the cleanup prompt, to remove the rows when finished.
+Inbound traffic includes direct-extension, ring-group-like, queue-like, and IVR-like records. Logical rows retain rich routing, recording, hangup, caller-name, DID, trunk/carrier, queue, start/answer/end, unique/linked ID, and channel metadata even when the installed schema cannot store every field. Endpoint technologies default to PJSIP and SIP.
 
-## What cdrgen reports
+Trunks can be discovered from FreePBX, provided explicitly, or created as CDR-only fake profiles. Names influence traffic: primary/preferred, secondary/overflow, backup/failover, inbound/outbound, toll-free, international, fax, and emergency traits are recognised, including joined words and useful small typos such as `incomming` and `prefered`.
 
-cdrgen reports concurrency three ways:
+## CLI
 
-- **Global peak**: how busy the PBX was overall.
-- **Per-trunk peak**: how busy each SIP trunk was. Internal calls do not touch trunks and do not count here.
-- **Per-extension peak**, in two flavours:
-  - **Handled-call peak**: how many calls each user was dealing with. An internal call counts once, against the called party.
-  - **Channel-leg peak**: how many channels were open against each extension. An internal call counts on both ends.
-
-These answer different questions. Group is for sizing the PBX. Trunk is for sizing SIP capacity. Extension handled-call is for understanding user workload. Extension channel-leg is for understanding raw channel occupancy per endpoint.
-
-## Usage
+Existing commands remain valid:
 
 ```bash
-cdrgen --profile=light
+php cdrgen.php --profile=light
+php cdrgen.php --profile=medium --seed=202
+php cdrgen.php --profile=heavy --seed=303
 ```
+
+Explicit inputs and database-free generation:
 
 ```bash
-cdrgen --profile=medium --seed=202
+php cdrgen.php --profile=medium --rows=5000 \
+  --start="2026-05-01 00:00:00" --end="2026-05-08 00:00:00" \
+  --timezone=UTC --seed=202 \
+  --trunks=PJSIP/Primary-In,PJSIP/Primary-Out,SIP/Failover-Test --dry-run
 ```
 
-```bash
-cdrgen --profile=heavy --seed=303
-```
-
-With explicit row count and date range:
-
-```bash
-cdrgen --profile=medium --rows=5000 --start="2026-05-01 00:00:00" --end="2026-05-08 00:00:00" --seed=202
-```
-
-## Interactive Mode
-
-Run without arguments for an interactive wizard:
-
-```bash
-cdrgen
-```
-
-The wizard prompts for profile, seed, date range, and trunk options, then runs the same generation as the CLI flags.
-
-## Options
+Options:
 
 ```text
 --profile=light|medium|heavy
@@ -83,178 +59,95 @@ The wizard prompts for profile, seed, date range, and trunk options, then runs t
 --rows=N
 --start="YYYY-MM-DD HH:MM:SS"
 --end="YYYY-MM-DD HH:MM:SS"
+--timezone=Area/Location
 --trunks=PJSIP/name,SIP/name
 --fake-trunks=N
+--concurrency-semantics=answered|cdr
+--fixture-accountcode
+--dry-run
 --help
 ```
 
-## Profiles
+Running without arguments retains an interactive profile/seed/trunk confirmation workflow. Automatic discovery ignores disabled FreePBX trunks when the schema exposes that flag. Fake trunks exist only in CDR data and may not appear in reports that require configured FreePBX trunks.
 
-- `light`: 250 rows over 1 day
-- `medium`: 2500 rows over 7 days
-- `heavy`: 15000 rows over 30 days
+`--fixture-accountcode` is deliberately separate from `--seed` and is intended only for disposable fixtures. Its tag derives from the complete canonical dataset identity, so different profiles, ranges, or inventories sharing a seed do not share a cleanup tag. Normal runs receive fresh cryptographically random tags.
 
-## Trunks
+## Reproducibility
 
-By default, cdrgen tries to load configured FreePBX trunks from the FreePBX configuration database and generate CDR rows using those trunk names. This is useful for tools that only report trunks already known to FreePBX.
+The generator is exactly deterministic only for the complete input: core version, random-source identity, profile, start/end instants, row count, timezone, ordered extension/name inventory, ordered profiled trunk inventory, endpoint technology policy, and generation options. A seed alone is not the whole contract.
 
-If no configured trunks are detected, cdrgen stops before inserting CDR rows and prompts you to create trunks, retry detection, explicitly use CDR-only fake trunks, or quit.
+The database run accountcode is excluded from the logical dataset fingerprint. Consequently repeated CLI insertions may have byte-identical traffic apart from their independently generated accountcodes. Callers wanting exact fixture rows must supply the same explicit accountcode too.
 
-### FreePBX Test Trunks
+`SeededRandomSource` maps the traditional integer CLI seed onto a platform-stable SHA-256 stream. Generation restarts a named traffic substream for every call, while trunk profiling uses an independent named substream; prior consumption and repeated `generate()` calls cannot alter a canonical request. `HashStreamRandomSource` accepts a 128-bit or larger scenario identity without collapsing it into 32-bit state. It uses SHA-256 of the complete identity and a 64-bit counter, and range generation uses rejection sampling to avoid modulo bias. Neither source requires packages, network access, or Git.
 
-For validating trunk reports such as Concurrency Count, create a few harmless test trunks in FreePBX with names that describe how they should behave:
+## Reusable API
 
-- `Primary-In`
-- `Primary-Out`
-- `Failover-Test`
+Load the small dependency-free autoloader (or bundle the `src` tree with your own PSR-4 loader):
 
-Using a dummy SIP server such as `test.test.com` is fine. The generator only needs the trunk names for CDR rows; the trunks do not need to register or pass real calls.
+```php
+require '/path/to/cdrgen/src/autoload.php';
 
-Important: if you disable the trunk in FreePBX, some reports may hide it and cdrgen may skip it during automatic trunk discovery. For best results, leave the test trunk enabled but pointed at a non-real SIP server. If you intentionally keep it disabled, force it with `--trunks`:
+$random = new CdrGen\Random\HashStreamRandomSource($scenarioIdentity);
+$profile = CdrGen\TrafficProfile::named('light');
+$request = new CdrGen\GenerationRequest(
+    $profile,
+    strtotime('2026-05-01 00:00:00 UTC'),
+    strtotime('2026-05-02 00:00:00 UTC'),
+    $random,
+    ['2001', '2002', '2010'],
+    $profiledTrunks,
+    ['timezone' => 'UTC', 'accountcode' => 'CCTESTfixture']
+);
+
+$result = (new CdrGen\Generator())->generate($request);
+foreach ($result->rows() as $cdr) {
+    // Complete logical CDR; no database side effects occurred.
+}
+
+echo $result->datasetIdentity();
+echo $result->metadata()['core_version'];
+```
+
+The intentionally small public surface is `Generator::generate(GenerationRequest)`, `GenerationResult`, `TrafficProfile`, the two random sources, and `Version`. `TrunkProfiler` is public for callers converting trunk inventory to generation metadata. Result statistics are derived from returned rows and include direction, disposition, trunk, and inbound-flow distributions.
+
+The core requires PHP 7.4+, no Composer installation, no particular checkout path, no Git metadata, and no network access. Schema discovery, mapping, insertion, transaction handling, cleanup, terminal output, argument parsing, prompts, and FreePBX bootstrapping remain outside it.
+
+## Expected concurrency
+
+Expected concurrency is independently calculated from generated rows in aligned 3,600-second chunks with bounded memory and inclusive endpoints. A call ending in the same second another begins overlaps in that second. Only `ANSWERED` rows are eligible and intervals are capped at 86,400 seconds as protection against corrupt data.
+
+- `answered` (standalone default) preserves CDRgen's historical expectation: answer timestamp through end, inclusive. This represents answered-media occupancy and is retained for backward comparison.
+- `cdr` uses calldate through `calldate + duration`, inclusive. This matches the current Concurrency Count CDR contract, including ringing time.
+
+Output includes global, per-trunk, per-extension handled-call, and per-extension visible-channel-leg peaks. Internal calls do not count against trunks.
+
+## Schema and insertion
+
+The generator always creates the complete logical row. `SchemaMapper` projects only fields supported by `SHOW COLUMNS` metadata, omits auto-increment columns, and permits missing nullable/defaulted optional columns. It rejects an unknown mandatory column rather than fabricating misleading empty, zero, or current-time values. `CdrRepository` uses prepared statements, inserts the run in one transaction, rolls back on error, and reports only the committed count. Cleanup accepts only an exact `CCTEST` accountcode.
+
+## Testing and development
+
+Pure tests need no PBX or database:
 
 ```bash
-cdrgen --profile=light --trunks=PJSIP/Primary-In,PJSIP/Primary-Out,PJSIP/Failover-Test
+php tests/run.php
+php tests/benchmark.php heavy
+find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l
 ```
 
-Expected behavior:
+The suite covers profiles, both deterministic random identities, exact reproduction, inventory sensitivity, row invariants and coverage, traffic weights/bursts, trunk traits and typo recognition, concurrency modes/chunk boundaries/inclusive overlap, schema projections, and dataset/run identity separation. A live PBX integration run is intentionally separate and optional; `--dry-run` is the normal development smoke test.
 
-- `Primary-In`: primary trunk, strongly inbound-biased
-- `Primary-Out`: primary trunk, strongly outbound-biased
-- `Failover-Test`: low-volume backup/failover behavior with more busy/failed calls
-
-You can force specific trunks:
+## Installation
 
 ```bash
-cdrgen --profile=light --trunks=PJSIP/main-out,SIP/backup-failover
+git clone https://github.com/kierknoby/cdrgen.git ~/cdrgen
+sudo ~/cdrgen/install.sh
 ```
 
-You can also add CDR-visible fake trunks explicitly:
-
-```bash
-cdrgen --profile=medium --fake-trunks=4
-```
-
-Fake trunks are only represented in CDR rows. They do not create FreePBX trunk configuration. Reports that require configured trunks may not show fake trunk names unless those trunks also exist in FreePBX. cdrgen no longer silently falls back to fake trunks when no configured trunks are detected.
-
-### Trunk Name Intelligence
-
-cdrgen applies exact and fuzzy matching to trunk names to infer behavior. It understands common naming patterns such as:
-
-- inbound: `in`, `inbound`, `incoming`, `ingress`, `did`, `ddi`, `rx`, `origination`
-- outbound: `out`, `outbound`, `outgoing`, `egress`, `tx`, `termination`
-- primary: `primary`, `main`, `default`, `prod`, `active`, `preferred`
-- secondary: `secondary`, `alt`, `alternate`, `overflow`, `spare`
-- backup: `backup`, `bkp`, `failover`, `standby`, `redundant`, `dr`
-- toll-free: `tollfree`, `tf`, `800`, `888`, `877`, `866`, `855`, `844`, `833`
-- international/long-distance: `intl`, `international`, `global`, `ld`, `longdistance`
-- special purpose: `fax`, `t38`, `e911`, `911`, `emergency`
-
-Fuzzy matching also handles joined names and small typos, for example `mainoutbound`, `backupfailover`, or `incomming`.
-
-## Seed
-
-The seed controls the pseudo-random generator.
-
-The same profile, seed, date range, row count, and trunk options should produce the same generated dataset. Different seeds produce different datasets.
-
-## Output
-
-After insertion, cdrgen prints:
-
-- generated traffic mix
-- disposition mix
-- trunk mix
-- expected answered-only global concurrency peak
-- expected answered-only per-extension handled-call peaks
-- expected answered-only per-extension channel-leg peaks
-- expected answered-only per-trunk peaks
-- cleanup SQL commands
-
-Non-answered calls are inserted into CDR but excluded from expected concurrency calculations.
-
-## Algorithm Notes
-
-Expected concurrency uses answered-only per-second occupancy with inclusive endpoints. A call active from `t_start` through `t_end` increments the occupancy counter for every second in `[t_start, t_end]`, and the peak is the maximum value across all occupied seconds.
-
-cdrgen prints two extension views:
-
-- Per-extension handled-call peak mirrors the original bash Extension mode: one selected extension per CDR row, preferring `dstchannel` and falling back to `channel`, with destination numbers starting `1` or `9` excluded.
-- Per-extension channel-leg peak counts every distinct visible extension leg in `channel` and `dstchannel` values matching `PJSIP/NNNN-...`.
-
-This matches the bash `concurrency-count` CLI tool, concurrencycount's `Original` engine, FreePBX CDR Reports' historical concurrent-calls implementation, and Asterisk-style runtime channel counting. A call ending at second `200` and another call starting at second `200` both count at second `200`.
-
-Per-call contribution to the expected seconds map is clamped to 86,400 seconds, or 24 hours, to protect against bogus long-duration CDR rows.
-
-For large datasets, cdrgen calculates expected peaks in time batches. Each batch still walks every active second inclusively; batching only limits memory use while preserving the same counting semantics.
-
-## Cleanup
-
-Each run uses a unique account code:
-
-```text
-CCTESTxxxxxxxx
-```
-
-At the end of a run, cdrgen prints cleanup SQL and then waits:
-
-```text
-DELETE or KEEP:
-```
-
-- Type `DELETE` to delete rows from the current run and exit.
-- Type `KEEP` to retain rows and exit.
-- Do nothing and the prompt repeats every 60 seconds.
-
-Delete one run manually:
-
-```bash
-mysql asteriskcdrdb -e "DELETE FROM cdr WHERE accountcode = 'CCTESTxxxxxxxx';"
-```
-
-Delete all generated rows:
-
-```bash
-mysql asteriskcdrdb -e "DELETE FROM cdr WHERE accountcode LIKE 'CCTEST%';"
-```
-
-## Features
-
-- FreePBX/Asterisk-compatible PHP CLI script
-- Loads `/etc/freepbx.conf`
-- Inserts into `asteriskcdrdb.cdr`
-- Uses PDO prepared statements
-- Dynamically adapts to the installed CDR schema with `SHOW COLUMNS FROM cdr`
-- Deterministic generation with `--seed`
-- Light, medium, and heavy profiles
-- Optional row and date range overrides
-- Realistic mixed traffic:
-  - inbound, outbound, and internal extension calls
-  - direct extension, ring-group-like, queue-like, and IVR-like inbound paths
-  - trunk and endpoint channels
-  - `ANSWERED`, `NO ANSWER`, `BUSY`, and `FAILED`
-  - business-hour weighting, after-hours traffic, and burst clustering
-- Trunk-aware generation:
-  - prefers configured FreePBX trunks when available
-  - supports explicit custom trunks
-  - supports CDR-visible fake trunks
-  - prompts before generation if no configured trunks are found
-  - infers trunk behavior from exact and fuzzy name matching
-- Calculates expected answered-only concurrency:
-  - global peak
-  - per-extension peak
-  - per-trunk peak
-- Tags generated rows with `accountcode = CCTESTxxxxxxxx`
-- Prints cleanup SQL
-- Keeps the CLI alive with a repeating cleanup prompt every 60 seconds
-
-## AI disclosure
-
-This tool has been developed with AI assistance for code generation, review, testing, and documentation. Changes should still be reviewed, tested, and accepted by a human maintainer before deployment.
+The installer makes `cdrgen.php` executable and links it as `/usr/local/bin/cdrgen`.
 
 ## Licence
 
-MIT. See LICENSE.
+MIT. See [LICENSE](LICENSE).
 
-## Author
-
-@kierknoby, Kieran Byrne // FreePBX UK
+Developed with AI assistance; changes still require human review before use.
