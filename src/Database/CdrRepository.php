@@ -19,10 +19,13 @@ final class CdrRepository
      * Supports varying row projections by preparing one statement per exact shape.
      * Omitted nullable/defaulted values remain omitted rather than being bound as NULL.
      */
-    public function insertAll(array $rows): int
+    public function insertAll(array $rows, ?callable $progress = null, int $batchSize = 500): int
     {
         if ($rows === []) {
             return 0;
+        }
+        if ($batchSize < 1) {
+            throw new \InvalidArgumentException('Insertion batch size must be positive');
         }
 
         $this->mapper->assertAccountcodeCapacity($this->metadata);
@@ -54,6 +57,9 @@ final class CdrRepository
 
                 $statements[$shape]->execute($parameters);
                 $count++;
+                if ($progress !== null && ($count % $batchSize === 0 || $count === count($rows))) {
+                    $progress($count, count($rows));
+                }
             }
 
             $verified = $this->countExact($accountcode);

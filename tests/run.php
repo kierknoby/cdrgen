@@ -69,6 +69,41 @@ final class StoragePolicyFailurePdo extends PDO
     }
 }
 
+final class TransactionCountingPdo extends PDO
+{
+    public $beginCalls = 0;
+    public $commitCalls = 0;
+    public $rollbackCalls = 0;
+
+    public function __construct()
+    {
+        parent::__construct('sqlite::memory:');
+        $this->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $this->exec(
+            'CREATE TABLE cdr (id INTEGER PRIMARY KEY AUTOINCREMENT, accountcode TEXT NOT NULL, '
+            . 'src TEXT NOT NULL, userfield TEXT NULL)'
+        );
+    }
+
+    public function beginTransaction(): bool
+    {
+        $this->beginCalls++;
+        return parent::beginTransaction();
+    }
+
+    public function commit(): bool
+    {
+        $this->commitCalls++;
+        return parent::commit();
+    }
+
+    public function rollBack(): bool
+    {
+        $this->rollbackCalls++;
+        return parent::rollBack();
+    }
+}
+
 function test(string $name, callable $callback): void
 {
     global $tests;
@@ -268,6 +303,28 @@ test('generation ignores prior random consumption and repeats from one request',
     assertSame($first->rows(), $second->rows());
     assertSame($second->rows(), $third->rows());
     assertSame($first->datasetIdentity(), $second->datasetIdentity());
+});
+
+test('generation progress checkpoints preserve deterministic output', static function (): void {
+    $request = fixtureRequest(42, 503);
+    $generator = new Generator();
+    $withoutProgress = $generator->generate($request);
+    $checkpoints = [];
+    $withProgress = $generator->generate(
+        $request,
+        static function (int $completed, int $total) use (&$checkpoints): void {
+            $checkpoints[] = [$completed, $total];
+        },
+        100
+    );
+    $differentBatch = $generator->generate($request, static function (): void {
+    }, 37);
+
+    assertSame($checkpoints, [[100, 503], [200, 503], [300, 503], [400, 503], [500, 503], [503, 503]]);
+    assertSame($withoutProgress->rows(), $withProgress->rows());
+    assertSame($withProgress->rows(), $differentBatch->rows());
+    assertSame($withoutProgress->statistics(), $withProgress->statistics());
+    assertSame($withoutProgress->datasetIdentity(), $withProgress->datasetIdentity());
 });
 
 test('same canonical input reproduces and changed identity changes rows', static function (): void {
@@ -524,6 +581,65 @@ test('repository transaction rollback and exact cleanup', static function (): vo
         // Expected.
     }
     assertSame((int) $pdo->query("SELECT COUNT(*) FROM cdr WHERE accountcode='CCTEST00000000000003'")->fetchColumn(), 0);
+});
+
+test('insertion progress preserves one transaction and complete rollback', static function (): void {
+    $pdo = new TransactionCountingPdo();
+    $repository = new CdrRepository($pdo, safetyMetadata());
+    $first = AccountcodePolicy::deterministic('progress-success');
+    $progress = [];
+    $rows = [];
+    foreach (['2001', '2002', '2003'] as $source) {
+        $rows[] = ['accountcode' => $first, 'src' => $source, 'userfield' => 'cdrgen progress'];
+    }
+    $repository->insertAll($rows, static function (int $completed, int $total) use (&$progress): void {
+        $progress[] = [$completed, $total];
+    }, 2);
+    assertSame($progress, [[2, 3], [3, 3]]);
+    assertSame([$pdo->beginCalls, $pdo->commitCalls, $pdo->rollbackCalls], [1, 1, 0]);
+
+    $repository->cleanup($first);
+    $pdo->exec(
+        "CREATE TRIGGER reject_progress BEFORE INSERT ON cdr WHEN NEW.src = 'bad' "
+        . "BEGIN SELECT RAISE(ABORT, 'bad row'); END"
+    );
+    $failed = AccountcodePolicy::deterministic('progress-failure');
+    $failedProgress = [];
+    try {
+        $repository->insertAll([
+            ['accountcode' => $failed, 'src' => 'good', 'userfield' => 'cdrgen progress'],
+            ['accountcode' => $failed, 'src' => 'bad', 'userfield' => 'cdrgen progress'],
+            ['accountcode' => $failed, 'src' => 'later', 'userfield' => 'cdrgen progress'],
+        ], static function (int $completed, int $total) use (&$failedProgress): void {
+            $failedProgress[] = [$completed, $total];
+        }, 1);
+        throw new RuntimeException('mid-insertion failure committed');
+    } catch (PDOException $error) {
+        // Expected.
+    }
+    assertSame($failedProgress, [[1, 3]]);
+    assertSame([$pdo->beginCalls, $pdo->commitCalls, $pdo->rollbackCalls], [2, 1, 1]);
+    assertSame($repository->countExact($failed), 0);
+});
+
+test('progress callback failure rolls back the active insertion transaction', static function (): void {
+    $pdo = new TransactionCountingPdo();
+    $repository = new CdrRepository($pdo, safetyMetadata());
+    $accountcode = AccountcodePolicy::deterministic('progress-callback-failure');
+    try {
+        $repository->insertAll([
+            ['accountcode' => $accountcode, 'src' => '2001', 'userfield' => 'cdrgen progress'],
+            ['accountcode' => $accountcode, 'src' => '2002', 'userfield' => 'cdrgen progress'],
+        ], static function (int $completed): void {
+            assertSame($completed, 1);
+            throw new RuntimeException('deliberate progress callback failure');
+        }, 1);
+        throw new RuntimeException('progress callback failure was ignored');
+    } catch (RuntimeException $error) {
+        assertSame($error->getMessage(), 'deliberate progress callback failure');
+    }
+    assertSame([$pdo->beginCalls, $pdo->commitCalls, $pdo->rollbackCalls], [1, 0, 1]);
+    assertSame($repository->countExact($accountcode), 0);
 });
 
 test('accountcodes fit varchar 20 with stable deterministic identity', static function (): void {
@@ -1073,6 +1189,22 @@ test('CLI help and restored wizard contracts are present', static function (): v
         'About to generate', '--keep'] as $phrase) {
         assertTrue(strpos($source, $phrase) !== false, 'wizard contract missing ' . $phrase);
     }
+});
+
+test('CLI dry-run reports progress and performs no database writes', static function (): void {
+    $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/../cdrgen.php')
+        . ' --profile=light --seed=123 --start=' . escapeshellarg('2026-05-01 00:00:00')
+        . ' --end=' . escapeshellarg('2026-05-02 00:00:00') . ' --dry-run 2>&1';
+    $output = [];
+    $status = 0;
+    exec($command, $output, $status);
+    $text = implode("\n", $output);
+    assertSame($status, 0);
+    assertTrue(strpos($text, 'Generating CDRs: 0 / 250 [0%]') !== false);
+    assertTrue(strpos($text, 'Generating CDRs: 250 / 250 [100%]') !== false);
+    assertTrue(strpos($text, 'no database writes') !== false);
+    assertTrue(strpos($text, 'Writing CDRs:') === false);
+    assertTrue(strpos($text, 'Calculating/reporting concurrency...') !== false);
 });
 
 test('wizard accepts abbreviated profile and prints confirmation summary without PBX access', static function (): void {

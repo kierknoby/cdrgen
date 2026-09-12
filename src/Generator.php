@@ -16,8 +16,15 @@ final class Generator
         ['outbound', 'NO ANSWER'],
     ];
 
-    public function generate(GenerationRequest $request): GenerationResult
+    public function generate(
+        GenerationRequest $request,
+        ?callable $progress = null,
+        int $batchSize = 500
+    ): GenerationResult
     {
+        if ($batchSize < 1) {
+            throw new \InvalidArgumentException('Generation batch size must be positive');
+        }
         // Always restart from the canonical traffic substream. Neither caller-side
         // consumption nor a previous generate() call can affect these rows.
         $random = $request->random()->fork('traffic-generation-v1');
@@ -38,6 +45,12 @@ final class Generator
                     $forced[1],
                     $sequence++
                 );
+                $completed = count($rows);
+                if ($progress !== null
+                    && ($completed % $batchSize === 0 || $completed === $request->rows())
+                ) {
+                    $progress($completed, $request->rows());
+                }
             }
         }
 

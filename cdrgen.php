@@ -159,19 +159,22 @@ if ($cdrgenLiveGuard !== null) {
     SignalCleanup::register($cdrgenLiveGuard, $cdrgenAccountcode);
 }
 
-$cdrgenStarted = microtime(true);
-$cdrgenResult = (new Generator())->generate($cdrgenRequest);
-$cdrgenElapsed = microtime(true) - $cdrgenStarted;
-
 echo "cdrgen\n======\n";
 echo 'Version: ' . Version::VERSION . " (testing only)\n";
 echo "Profile: {$cdrgenProfileName}\nRows: {$cdrgenRows}\nSeed: {$cdrgenSeed}\nTimezone: {$cdrgenTimezoneName}\n";
 echo 'Range: ' . formatTimestamp($cdrgenStart, $cdrgenTimezone) . ' to ' . formatTimestamp($cdrgenEnd, $cdrgenTimezone) . "\n";
-echo 'Dataset identity: ' . $cdrgenResult->datasetIdentity() . "\nAccountcode: {$cdrgenAccountcode}\n\n";
+echo "Accountcode: {$cdrgenAccountcode}\n\n";
+
+$cdrgenStarted = microtime(true);
+$cdrgenGenerationProgress = cliProgress('Generating CDRs', $cdrgenRows);
+$cdrgenResult = (new Generator())->generate($cdrgenRequest, $cdrgenGenerationProgress, 500);
+$cdrgenElapsed = microtime(true) - $cdrgenStarted;
+echo 'Dataset identity: ' . $cdrgenResult->datasetIdentity() . "\n\n";
 
 if ($cdrgenCdrPdo !== null) {
     $cdrgenLiveGuard->armCleanup();
-    $cdrgenInserted = $cdrgenRepository->insertAll($cdrgenResult->rows());
+    $cdrgenWriteProgress = cliProgress('Writing CDRs', $cdrgenRows);
+    $cdrgenInserted = $cdrgenRepository->insertAll($cdrgenResult->rows(), $cdrgenWriteProgress, 500);
     if ($cdrgenInserted !== count($cdrgenResult->rows())) {
         throw new RuntimeException("Committed row count {$cdrgenInserted} does not match generated count " . count($cdrgenResult->rows()));
     }
@@ -179,6 +182,7 @@ if ($cdrgenCdrPdo !== null) {
 } else {
     echo 'Generated in memory in ' . number_format($cdrgenElapsed, 3) . "s (no database writes)\n\n";
 }
+echo "Calculating/reporting concurrency...\n";
 printStatistics($cdrgenResult->statistics());
 $cdrgenConfiguredTrunkChannels = array_map(static function (array $trunk): string {
     return (string) ($trunk['channel'] ?? '');
@@ -194,9 +198,53 @@ if ($cdrgenLiveGuard !== null) {
         echo "Recovery record: {$cdrgenStateDirectory}/active-run.json\n";
         echo "The next live CDRgen start will recover this exact run before proceeding.\n";
     } else {
+        echo "\nCleaning up temporary CDRs...\n";
         $cdrgenDeleted = $cdrgenLiveGuard->cleanupTemporary();
         echo "\nCleanup verified: deleted {$cdrgenDeleted} rows for {$cdrgenAccountcode}; zero CCTEST rows remain.\n";
     }
+}
+
+function cliProgress(string $label, int $total): callable
+{
+    $interactive = function_exists('stream_isatty') && stream_isatty(STDOUT);
+    $nextLog = max(1, (int) ceil($total / 10));
+    $lastLogged = 0;
+    $render = static function (int $completed) use ($label, $total): string {
+        $percent = $total > 0 ? (int) floor($completed * 100 / $total) : 100;
+        return "{$label}: {$completed} / {$total} [{$percent}%]";
+    };
+
+    if ($interactive) {
+        echo "\r" . $render(0);
+        flush();
+    } else {
+        echo $render(0) . "\n";
+    }
+
+    return static function (int $completed, int $reportedTotal) use (
+        $interactive,
+        $total,
+        $nextLog,
+        &$lastLogged,
+        $render
+    ): void {
+        if ($reportedTotal !== $total) {
+            throw new RuntimeException('Progress total changed during operation');
+        }
+        if ($interactive) {
+            echo "\r" . $render($completed);
+            if ($completed === $total) {
+                echo "\n";
+            }
+            flush();
+            return;
+        }
+        if ($completed === $total || $completed - $lastLogged >= $nextLog) {
+            echo $render($completed) . "\n";
+            $lastLogged = $completed;
+            flush();
+        }
+    };
 }
 
 function usage(int $exitCode): void
