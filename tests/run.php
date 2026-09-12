@@ -31,6 +31,44 @@ final class SkipTest extends RuntimeException
 {
 }
 
+final class StoragePolicyFailurePdo extends PDO
+{
+    public $beginTransactionCalls = 0;
+    public $prepareCalls = 0;
+
+    public function __construct()
+    {
+        parent::__construct('sqlite::memory:');
+        $this->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $this->exec(
+            'CREATE TABLE cdr (id INTEGER PRIMARY KEY AUTOINCREMENT, accountcode TEXT NOT NULL, '
+            . 'src TEXT NOT NULL, userfield TEXT NULL)'
+        );
+    }
+
+    #[\ReturnTypeWillChange]
+    public function getAttribute($attribute)
+    {
+        if ($attribute === PDO::ATTR_DRIVER_NAME) {
+            throw new RuntimeException('controlled storage-policy discovery failure');
+        }
+        return parent::getAttribute($attribute);
+    }
+
+    public function beginTransaction(): bool
+    {
+        $this->beginTransactionCalls++;
+        return parent::beginTransaction();
+    }
+
+    #[\ReturnTypeWillChange]
+    public function prepare($query, $options = [])
+    {
+        $this->prepareCalls++;
+        return parent::prepare($query, $options);
+    }
+}
+
 function test(string $name, callable $callback): void
 {
     global $tests;
@@ -548,7 +586,7 @@ test('transactional storage policy accepts SQLite and InnoDB only', static funct
 });
 
 test('transactional storage failure occurs before generated insertion begins', static function (): void {
-    $pdo = (new ReflectionClass(PDO::class))->newInstanceWithoutConstructor();
+    $pdo = new StoragePolicyFailurePdo();
     $repository = new CdrRepository($pdo, safetyMetadata());
     try {
         $repository->insertAll([[
@@ -560,6 +598,9 @@ test('transactional storage failure occurs before generated insertion begins', s
     } catch (RuntimeException $error) {
         assertTrue(strpos($error->getMessage(), 'transactional rollback safety') !== false);
     }
+    assertSame($pdo->beginTransactionCalls, 0);
+    assertSame($pdo->prepareCalls, 0);
+    assertSame((int) $pdo->query('SELECT COUNT(*) FROM cdr')->fetchColumn(), 0);
 });
 
 test('exact identity verification rolls back simulated silent truncation', static function (): void {
