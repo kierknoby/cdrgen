@@ -10,6 +10,7 @@ require __DIR__ . '/src/autoload.php';
 
 use CdrGen\Concurrency\ConcurrencySemantics;
 use CdrGen\Concurrency\ExpectedConcurrencyCalculator;
+use CdrGen\Cli\WizardDateRange;
 use CdrGen\Database\CdrRepository;
 use CdrGen\Database\ActiveRunStore;
 use CdrGen\Database\ConnectionSettings;
@@ -89,6 +90,7 @@ if (isset($cdrgenOptions['dry-run'])) {
         );
     }
 } else {
+    echo "Loading FreePBX configuration. Please wait...\n";
     $bootstrap_settings['freepbx_auth'] = false;
     require_once '/etc/freepbx.conf';
     $cdrgenCdrPdo = connectCdrPdo($amp_conf ?? []);
@@ -97,7 +99,9 @@ if (isset($cdrgenOptions['dry-run'])) {
     } catch (Throwable $error) {
         $cdrgenConfigPdo = $cdrgenCdrPdo;
     }
+    echo "Discovering configured trunks. Please wait...\n";
     $cdrgenTrunks = resolveTrunks($cdrgenConfigPdo, $cdrgenOptions, $cdrgenProfiler, $cdrgenProfilingRandom);
+    echo "Checking CDR schema and recovery state. Please wait...\n";
     $cdrgenMetadata = loadCdrColumns($cdrgenCdrPdo);
     $cdrgenStateDirectory = '/var/lib/cdrgen';
     $cdrgenProcessLock = ProcessLock::acquire($cdrgenStateDirectory . '/live-run.lock');
@@ -184,7 +188,7 @@ if ($cdrgenCdrPdo !== null) {
 } else {
     echo 'Generated in memory in ' . number_format($cdrgenElapsed, 3) . "s (no database writes)\n\n";
 }
-echo "Calculating/reporting concurrency...\n";
+echo "Calculating/reporting concurrency. Please wait...\n";
 printStatistics($cdrgenResult->statistics());
 $cdrgenConfiguredTrunkChannels = array_map(static function (array $trunk): string {
     return (string) ($trunk['channel'] ?? '');
@@ -305,7 +309,13 @@ function runWizard(): array
     $dateChoice = ask('Choose [1-2]', '1', static function (string $input) {
         return in_array($input, ['1', '2'], true);
     });
-    if ($dateChoice === '2') {
+    $profile = TrafficProfile::named($profileName);
+    if ($dateChoice === '1') {
+        $options = array_merge(
+            $options,
+            WizardDateRange::profileDefault($profile, time(), date_default_timezone_get())
+        );
+    } else {
         while (true) {
             $start = ask('Start date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)', null, static function (string $input) {
                 return normalizeWizardDate($input, false) !== null;
@@ -342,9 +352,8 @@ function runWizard(): array
         $trunkSummary = $options['fake-trunks'] . ' CDR-only fake trunks';
     }
 
-    $profile = TrafficProfile::named($profileName);
-    $summaryEnd = $options['end'] ?? date('Y-m-d H:i:s');
-    $summaryStart = $options['start'] ?? date('Y-m-d H:i:s', strtotime($summaryEnd) - $profile->days() * 86400);
+    $summaryEnd = $options['end'];
+    $summaryStart = $options['start'];
     echo "\nAbout to generate:\n";
     echo "  Profile: {$profileName}\n  Rows: {$profile->rows()} (profile default)\n";
     echo "  Date: {$summaryStart} to {$summaryEnd}" . ($dateChoice === '1' ? ' (profile default)' : '') . "\n";
@@ -353,7 +362,10 @@ function runWizard(): array
     while (true) {
         echo "Proceed? [Y/n]:\n> ";
         $answer = strtolower(trim(readStdinOrExit()));
-        if ($answer === '' || $answer === 'y' || $answer === 'yes') return $options;
+        if ($answer === '' || $answer === 'y' || $answer === 'yes') {
+            echo "Preparing confirmed run. Please wait...\n";
+            return $options;
+        }
         if ($answer === 'n' || $answer === 'no') { echo "Cancelled.\n"; exit(1); }
         echo "Please answer y or n.\n";
     }

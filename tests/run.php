@@ -5,6 +5,7 @@ require __DIR__ . '/../src/autoload.php';
 
 use CdrGen\Concurrency\ConcurrencySemantics;
 use CdrGen\Concurrency\ExpectedConcurrencyCalculator;
+use CdrGen\Cli\WizardDateRange;
 use CdrGen\Database\CdrRepository;
 use CdrGen\Database\ConnectionSettings;
 use CdrGen\Database\AccountcodePolicy;
@@ -1191,6 +1192,32 @@ test('CLI help and restored wizard contracts are present', static function (): v
     }
 });
 
+test('opaque CLI stages and confirmed wizard transition provide wait feedback', static function (): void {
+    $source = file_get_contents(__DIR__ . '/../cdrgen.php');
+    foreach ([
+        'Preparing confirmed run. Please wait...',
+        'Loading FreePBX configuration. Please wait...',
+        'Discovering configured trunks. Please wait...',
+        'Checking CDR schema and recovery state. Please wait...',
+        'Calculating/reporting concurrency. Please wait...',
+    ] as $message) {
+        assertTrue(strpos($source, $message) !== false, 'missing wait feedback: ' . $message);
+    }
+    assertTrue(
+        strpos($source, 'Loading FreePBX configuration. Please wait...')
+            < strpos($source, "require_once '/etc/freepbx.conf';"),
+        'FreePBX wait feedback occurs after bootstrap'
+    );
+    $wizardStart = strpos($source, 'function runWizard(): array');
+    $wizardEnd = strpos($source, 'function ask(', $wizardStart);
+    $wizardSource = substr($source, $wizardStart, $wizardEnd - $wizardStart);
+    assertTrue(
+        strpos($wizardSource, 'Preparing confirmed run. Please wait...')
+            < strpos($wizardSource, 'return $options;'),
+        'wizard acknowledgement does not precede confirmed return'
+    );
+});
+
 test('CLI rejects unknown and malformed options before generation', static function (): void {
     $entrypoint = escapeshellarg(__DIR__ . '/../cdrgen.php');
     $output = [];
@@ -1245,7 +1272,7 @@ test('CLI dry-run reports progress and performs no database writes', static func
     assertTrue(strpos($text, 'Generating CDRs: 250 / 250 [100%]') !== false);
     assertTrue(strpos($text, 'no database writes') !== false);
     assertTrue(strpos($text, 'Writing CDRs:') === false);
-    assertTrue(strpos($text, 'Calculating/reporting concurrency...') !== false);
+    assertTrue(strpos($text, 'Calculating/reporting concurrency. Please wait...') !== false);
 });
 
 test('wizard accepts abbreviated profile and prints confirmation summary without PBX access', static function (): void {
@@ -1260,6 +1287,30 @@ test('wizard accepts abbreviated profile and prints confirmation summary without
     assertTrue(strpos($text, 'Date:') !== false);
     assertTrue(strpos($text, 'Trunks: PJSIP/Test') !== false);
     assertTrue(strpos($text, 'Cancelled.') !== false);
+});
+
+test('wizard profile-default dates are frozen as exact execution options', static function (): void {
+    $now = 1789245078;
+    $profile = TrafficProfile::named('heavy');
+    $options = WizardDateRange::profileDefault($profile, $now, 'UTC');
+    assertSame($options, [
+        'start' => '2026-08-13 20:31:18',
+        'end' => '2026-09-12 20:31:18',
+    ]);
+
+    $timezone = new DateTimeZone('UTC');
+    $executionStart = (new DateTimeImmutable($options['start'], $timezone))->getTimestamp();
+    $executionEnd = (new DateTimeImmutable($options['end'], $timezone))->getTimestamp();
+    assertSame($executionStart, $now - $profile->days() * 86400);
+    assertSame($executionEnd, $now);
+    assertSame(
+        (new DateTimeImmutable('@' . $executionStart))->setTimezone($timezone)->format('Y-m-d H:i:s'),
+        $options['start']
+    );
+    assertSame(
+        (new DateTimeImmutable('@' . $executionEnd))->setTimezone($timezone)->format('Y-m-d H:i:s'),
+        $options['end']
+    );
 });
 
 test('FreePBX bootstrap globals cannot overwrite CDRgen timezone state', static function (): void {
