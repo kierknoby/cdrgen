@@ -180,7 +180,13 @@ if ($cdrgenCdrPdo !== null) {
     echo 'Generated in memory in ' . number_format($cdrgenElapsed, 3) . "s (no database writes)\n\n";
 }
 printStatistics($cdrgenResult->statistics());
-printExpected((new ExpectedConcurrencyCalculator($cdrgenSemantics))->calculate($cdrgenResult->rows()));
+$cdrgenConfiguredTrunkChannels = array_map(static function (array $trunk): string {
+    return (string) ($trunk['channel'] ?? '');
+}, $cdrgenTrunks);
+printExpected((new ExpectedConcurrencyCalculator($cdrgenSemantics))->calculate(
+    $cdrgenResult->rows(),
+    $cdrgenConfiguredTrunkChannels
+));
 
 if ($cdrgenLiveGuard !== null) {
     if ($cdrgenLiveGuard->isRetained()) {

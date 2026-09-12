@@ -393,6 +393,34 @@ test('legacy and CDR concurrency technology contracts', static function (): void
     assertSame($cdr['global'], 1, 'CDR semantics must include SIP-only answered rows');
 });
 
+test('configured trunk identity takes precedence over PJSIP extension heuristics', static function (): void {
+    $row = static function (string $channel, string $dstchannel, string $trunk): array {
+        return [
+            'calldate' => '1970-01-01 00:16:40', 'duration' => 10, 'billsec' => 8,
+            'disposition' => 'ANSWERED', 'channel' => $channel, 'dstchannel' => $dstchannel,
+            'dst' => '2001', '_start_ts' => 1000, '_answer_ts' => 1002, '_end_ts' => 1010,
+            '_trunk' => $trunk, 'trunk' => $trunk,
+        ];
+    };
+    $rows = [
+        $row('PJSIP/2001-a', 'PJSIP/20260827-a', '20260827'),
+        $row('PJSIP/provider-a', 'PJSIP/2010-a', 'provider'),
+    ];
+    $calculator = new ExpectedConcurrencyCalculator();
+    $configured = ['PJSIP/20260827', 'PJSIP/provider'];
+    $first = $calculator->calculate($rows, $configured);
+    $second = $calculator->calculate($rows, $configured);
+
+    assertSame($first, $second, 'configured-trunk classification is not deterministic');
+    assertSame($first['trunks']['20260827'], 1);
+    assertSame($first['trunks']['provider'], 1);
+    assertTrue(!isset($first['extensions_handled']['20260827']));
+    assertTrue(!isset($first['extensions_channel']['20260827']));
+    assertSame($first['extensions_channel']['2001'], 1);
+    assertSame($first['extensions_handled']['2010'], 1);
+    assertSame($first['extensions_channel']['2010'], 1);
+});
+
 test('inclusive concurrency, chunk boundaries, exclusions, and long calls', static function (): void {
     $calculator = new ExpectedConcurrencyCalculator();
     assertSame($calculator->calculate([])['global'], 0);

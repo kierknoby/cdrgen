@@ -18,8 +18,9 @@ final class ExpectedConcurrencyCalculator
         $this->maxSeconds = $maxSeconds;
     }
 
-    public function calculate(array $rows): array
+    public function calculate(array $rows, array $configuredTrunkChannels = []): array
     {
+        $configuredPjsipTrunks = $this->configuredPjsipTrunks($configuredTrunkChannels);
         $intervals = [
             'global' => [],
             'extensions_handled' => [],
@@ -39,10 +40,13 @@ final class ExpectedConcurrencyCalculator
 
             $intervals['global'][] = $interval;
             $handled = $this->handledPjsipExtension($row);
-            if ($handled !== null) {
+            if ($handled !== null && !isset($configuredPjsipTrunks[$handled])) {
                 $intervals['extensions_handled'][$handled][] = $interval;
             }
             foreach ($this->visiblePjsipExtensions($row) as $extension) {
+                if (isset($configuredPjsipTrunks[$extension])) {
+                    continue;
+                }
                 $intervals['extensions_channel'][$extension][] = $interval;
             }
 
@@ -160,5 +164,18 @@ final class ExpectedConcurrencyCalculator
             }
         }
         return array_keys($extensions);
+    }
+
+    private function configuredPjsipTrunks(array $channels): array
+    {
+        $trunks = [];
+        foreach ($channels as $channel) {
+            if (is_string($channel)
+                && preg_match('/^PJSIP\/([^\/]+)$/', $channel, $matches) === 1
+            ) {
+                $trunks[$matches[1]] = true;
+            }
+        }
+        return $trunks;
     }
 }
