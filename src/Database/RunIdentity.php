@@ -4,10 +4,10 @@ namespace CdrGen\Database;
 
 final class RunIdentity
 {
-    /** Cryptographically random 64-bit suffix; not a mathematical uniqueness guarantee. */
+    /** Cryptographically random 56-bit suffix; not a mathematical uniqueness guarantee. */
     public static function randomAccountcode(): string
     {
-        return 'CCTEST' . bin2hex(random_bytes(8));
+        return AccountcodePolicy::random();
     }
 
     /** Kept as a compatibility alias for the first 1.1 development snapshot. */
@@ -18,7 +18,7 @@ final class RunIdentity
 
     public static function deterministicAccountcode(string $datasetIdentity): string
     {
-        return 'CCTEST' . substr(hash('sha256', 'fixture:' . $datasetIdentity), 0, 16);
+        return AccountcodePolicy::deterministic($datasetIdentity);
     }
 
     private function __construct()

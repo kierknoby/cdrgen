@@ -11,7 +11,11 @@ require __DIR__ . '/src/autoload.php';
 use CdrGen\Concurrency\ConcurrencySemantics;
 use CdrGen\Concurrency\ExpectedConcurrencyCalculator;
 use CdrGen\Database\CdrRepository;
+use CdrGen\Database\ActiveRunStore;
 use CdrGen\Database\ConnectionSettings;
+use CdrGen\Database\LiveRunGuard;
+use CdrGen\Database\ProcessLock;
+use CdrGen\Database\SignalCleanup;
 use CdrGen\Database\RunIdentity;
 use CdrGen\GenerationRequest;
 use CdrGen\Generator;
@@ -23,7 +27,7 @@ use CdrGen\Version;
 $cdrgenLongOptions = [
     'profile::', 'seed::', 'rows::', 'start::', 'end::',
     'trunks::', 'fake-trunks::', 'concurrency-semantics::',
-    'timezone::', 'dry-run', 'fixture-accountcode', 'help',
+    'timezone::', 'dry-run', 'fixture-accountcode', 'keep', 'help',
 ];
 $cdrgenOptions = $argc === 1 ? runWizard() : getopt('', $cdrgenLongOptions);
 if (isset($cdrgenOptions['help'])) {
@@ -69,6 +73,9 @@ $cdrgenProfilingRandom = $cdrgenScenarioRandom->fork('trunk-profiling-v1');
 $cdrgenProfiler = new TrunkProfiler();
 $cdrgenCdrPdo = null;
 $cdrgenMetadata = [];
+$cdrgenRepository = null;
+$cdrgenLiveGuard = null;
+$cdrgenProcessLock = null;
 
 if (isset($cdrgenOptions['dry-run'])) {
     $cdrgenExplicitTrunks = (string) ($cdrgenOptions['trunks'] ?? 'PJSIP/Primary-In,PJSIP/Primary-Out,SIP/Failover-Test');
@@ -90,6 +97,19 @@ if (isset($cdrgenOptions['dry-run'])) {
     }
     $cdrgenTrunks = resolveTrunks($cdrgenConfigPdo, $cdrgenOptions, $cdrgenProfiler, $cdrgenProfilingRandom);
     $cdrgenMetadata = loadCdrColumns($cdrgenCdrPdo);
+    $cdrgenStateDirectory = '/var/lib/cdrgen';
+    $cdrgenProcessLock = ProcessLock::acquire($cdrgenStateDirectory . '/live-run.lock');
+    $cdrgenRepository = new CdrRepository($cdrgenCdrPdo, $cdrgenMetadata);
+    $cdrgenRepository->assertSchemaSafe();
+    $cdrgenLiveGuard = new LiveRunGuard(
+        $cdrgenRepository,
+        new ActiveRunStore($cdrgenStateDirectory . '/active-run.json')
+    );
+    $cdrgenRecovered = $cdrgenLiveGuard->recoverAndRequireClean();
+    foreach ($cdrgenRecovered as $cdrgenRecoveredAccountcode => $cdrgenRecoverySource) {
+        echo "Recovered and verified stale CDRgen run {$cdrgenRecoveredAccountcode} ({$cdrgenRecoverySource}).\n";
+    }
+    $cdrgenRepository->assertTransactionalStorage();
 }
 
 if ($cdrgenTrunks === []) {
@@ -132,6 +152,13 @@ $cdrgenRequest = new GenerationRequest(
     $cdrgenRequestOptions
 );
 
+if ($cdrgenLiveGuard !== null) {
+    SignalCleanup::assertSupported();
+    $cdrgenKeep = isset($cdrgenOptions['keep']);
+    $cdrgenLiveGuard->prepare($cdrgenAccountcode, $cdrgenKeep);
+    SignalCleanup::register($cdrgenLiveGuard, $cdrgenAccountcode);
+}
+
 $cdrgenStarted = microtime(true);
 $cdrgenResult = (new Generator())->generate($cdrgenRequest);
 $cdrgenElapsed = microtime(true) - $cdrgenStarted;
@@ -143,7 +170,7 @@ echo 'Range: ' . formatTimestamp($cdrgenStart, $cdrgenTimezone) . ' to ' . forma
 echo 'Dataset identity: ' . $cdrgenResult->datasetIdentity() . "\nAccountcode: {$cdrgenAccountcode}\n\n";
 
 if ($cdrgenCdrPdo !== null) {
-    $cdrgenRepository = new CdrRepository($cdrgenCdrPdo, $cdrgenMetadata);
+    $cdrgenLiveGuard->armCleanup();
     $cdrgenInserted = $cdrgenRepository->insertAll($cdrgenResult->rows());
     if ($cdrgenInserted !== count($cdrgenResult->rows())) {
         throw new RuntimeException("Committed row count {$cdrgenInserted} does not match generated count " . count($cdrgenResult->rows()));
@@ -155,10 +182,15 @@ if ($cdrgenCdrPdo !== null) {
 printStatistics($cdrgenResult->statistics());
 printExpected((new ExpectedConcurrencyCalculator($cdrgenSemantics))->calculate($cdrgenResult->rows()));
 
-if ($cdrgenCdrPdo !== null) {
-    echo "\nCleanup SQL\n-----------\n";
-    echo "mysql asteriskcdrdb -e \"DELETE FROM cdr WHERE accountcode = '{$cdrgenAccountcode}';\"\n";
-    promptCleanup($cdrgenRepository, $cdrgenAccountcode);
+if ($cdrgenLiveGuard !== null) {
+    if ($cdrgenLiveGuard->isRetained()) {
+        echo "\nRows deliberately retained because --keep was supplied.\n";
+        echo "Recovery record: {$cdrgenStateDirectory}/active-run.json\n";
+        echo "The next live CDRgen start will recover this exact run before proceeding.\n";
+    } else {
+        $cdrgenDeleted = $cdrgenLiveGuard->cleanupTemporary();
+        echo "\nCleanup verified: deleted {$cdrgenDeleted} rows for {$cdrgenAccountcode}; zero CCTEST rows remain.\n";
+    }
 }
 
 function usage(int $exitCode): void
@@ -166,7 +198,7 @@ function usage(int $exitCode): void
     echo 'cdrgen ' . Version::VERSION . "\n";
     echo "Usage: cdrgen --profile=light|medium|heavy [--seed=N] [--rows=N] [--start=DATE] [--end=DATE]\n";
     echo "       [--trunks=LIST] [--fake-trunks=N] [--timezone=ZONE]\n";
-    echo "       [--concurrency-semantics=answered|cdr] [--fixture-accountcode] [--dry-run]\n";
+    echo "       [--concurrency-semantics=answered|cdr] [--fixture-accountcode] [--keep] [--dry-run]\n";
     exit($exitCode);
 }
 
@@ -471,27 +503,5 @@ function printExpected(array $expected): void
     foreach (['extensions_handled', 'extensions_channel', 'trunks'] as $kind) {
         echo "\n" . ucfirst(str_replace('_', ' ', $kind)) . ":\n";
         foreach ($expected[$kind] as $name => $peak) echo "  {$name}: {$peak}\n";
-    }
-}
-
-function promptCleanup(CdrRepository $repository, string $accountcode): void
-{
-    echo "\nType DELETE to remove rows from this run, or KEEP to retain rows and exit.\n";
-    while (true) {
-        echo '[' . date('Y-m-d H:i:s') . '] DELETE or KEEP: ';
-        $read = [STDIN]; $write = null; $except = null;
-        $ready = @stream_select($read, $write, $except, 60);
-        if ($ready === false) $answer = trim((string) fgets(STDIN));
-        elseif ($ready > 0) {
-            $line = fgets(STDIN);
-            if ($line === false) { echo "\nSTDIN closed; rows retained.\n"; return; }
-            $answer = trim($line);
-        } else {
-            echo "\nStill waiting. Rows remain tagged with accountcode {$accountcode}.\n";
-            continue;
-        }
-        if ($answer === 'DELETE') { echo 'Deleted ' . $repository->cleanup($accountcode) . " rows for {$accountcode}\n"; return; }
-        if ($answer === 'KEEP') { echo "Rows retained.\n"; return; }
-        echo "Unrecognized input. Type DELETE to clean up, or KEEP to exit.\n";
     }
 }

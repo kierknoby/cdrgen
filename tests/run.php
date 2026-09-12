@@ -7,6 +7,13 @@ use CdrGen\Concurrency\ConcurrencySemantics;
 use CdrGen\Concurrency\ExpectedConcurrencyCalculator;
 use CdrGen\Database\CdrRepository;
 use CdrGen\Database\ConnectionSettings;
+use CdrGen\Database\AccountcodePolicy;
+use CdrGen\Database\ActiveRunStore;
+use CdrGen\Database\LiveRunGuard;
+use CdrGen\Database\ProcessLock;
+use CdrGen\Database\StateDirectory;
+use CdrGen\Database\SignalCleanup;
+use CdrGen\Database\TransactionalStoragePolicy;
 use CdrGen\Database\RunIdentity;
 use CdrGen\Database\SchemaMapper;
 use CdrGen\GenerationRequest;
@@ -19,6 +26,10 @@ use CdrGen\TrunkProfiler;
 use CdrGen\Version;
 
 $tests = [];
+
+final class SkipTest extends RuntimeException
+{
+}
 
 function test(string $name, callable $callback): void
 {
@@ -39,6 +50,16 @@ function assertSame($actual, $expected, string $message = 'values differ'): void
         throw new RuntimeException(
             $message . '; expected ' . var_export($expected, true) . ', got ' . var_export($actual, true)
         );
+    }
+}
+
+function requireSignalSupport(): void
+{
+    if (!function_exists('pcntl_signal')
+        || !function_exists('pcntl_async_signals')
+        || !function_exists('posix_kill')
+    ) {
+        throw new SkipTest('pcntl_signal, pcntl_async_signals, and posix_kill are required');
     }
 }
 
@@ -82,6 +103,85 @@ function fixtureRequest(
 function fixtureResult(...$arguments)
 {
     return (new Generator())->generate(fixtureRequest(...$arguments));
+}
+
+function safetyMetadata(int $accountcodeLength = 20): array
+{
+    return [
+        ['Field' => 'id', 'Type' => 'integer', 'Extra' => 'auto_increment', 'Null' => 'NO', 'Default' => null],
+        ['Field' => 'accountcode', 'Type' => "varchar({$accountcodeLength})", 'Extra' => '', 'Null' => 'NO', 'Default' => null],
+        ['Field' => 'src', 'Type' => 'varchar(20)', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
+        ['Field' => 'userfield', 'Type' => 'varchar(255)', 'Extra' => '', 'Null' => 'YES', 'Default' => null],
+    ];
+}
+
+function safetyDatabase(): PDO
+{
+    $pdo = new PDO('sqlite::memory:');
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $pdo->exec('CREATE TABLE cdr (id INTEGER PRIMARY KEY AUTOINCREMENT, accountcode TEXT NOT NULL, src TEXT NOT NULL, userfield TEXT NULL)');
+    return $pdo;
+}
+
+function runSignalWorker(string $mode, int $signal): array
+{
+    $directory = sys_get_temp_dir() . '/cdrgen-signal-' . bin2hex(random_bytes(6));
+    mkdir($directory, 0700, true);
+    $database = $directory . '/cdr.sqlite';
+    $command = 'exec ' . escapeshellarg(PHP_BINARY) . ' '
+        . escapeshellarg(__DIR__ . '/signal-worker.php') . ' '
+        . escapeshellarg($database) . ' '
+        . escapeshellarg($directory) . ' '
+        . escapeshellarg($mode);
+    $pipes = [];
+    $process = proc_open($command, [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ], $pipes);
+    if (!is_resource($process)) {
+        throw new RuntimeException('Could not start signal test worker');
+    }
+    fclose($pipes[0]);
+    $ready = fgets($pipes[1]);
+    assertTrue(is_string($ready) && strpos($ready, 'READY ') === 0, 'signal worker did not become ready');
+    $accountcode = trim(substr($ready, 6));
+    $status = proc_get_status($process);
+    assertTrue(posix_kill($status['pid'], $signal), 'could not signal worker');
+    $exitCode = null;
+    for ($attempt = 0; $attempt < 100; $attempt++) {
+        usleep(20000);
+        $status = proc_get_status($process);
+        if (!$status['running']) {
+            $exitCode = $status['exitcode'];
+            break;
+        }
+    }
+    if ($exitCode === null) {
+        posix_kill($status['pid'], SIGKILL);
+        throw new RuntimeException('signal worker did not exit');
+    }
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    proc_close($process);
+    $pdo = new PDO('sqlite:' . $database);
+    $rows = (int) $pdo->query('SELECT COUNT(*) FROM cdr')->fetchColumn();
+    $stateExists = is_file($directory . '/active-run.json');
+    return [$exitCode, $rows, $stateExists, $stderr, $directory, $database, $accountcode];
+}
+
+function removeSignalArtifacts(string $directory, string $database): void
+{
+    foreach (glob($database . '*') as $path) {
+        unlink($path);
+    }
+    $record = $directory . '/active-run.json';
+    if (is_file($record)) {
+        unlink($record);
+    }
+    rmdir($directory);
 }
 
 test('profile definitions and version metadata', static function (): void {
@@ -267,7 +367,7 @@ test('schema mapper optional, defaulted, nullable, auto, and mandatory columns',
     $mapper = new SchemaMapper();
     $metadata = [
         ['Field' => 'id', 'Extra' => 'auto_increment', 'Null' => 'NO', 'Default' => null],
-        ['Field' => 'accountcode', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
+        ['Field' => 'accountcode', 'Type' => 'varchar(20)', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
         ['Field' => 'src', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
         ['Field' => 'nullable', 'Extra' => '', 'Null' => 'YES', 'Default' => null],
         ['Field' => 'defaulted', 'Extra' => '', 'Null' => 'NO', 'Default' => 'database-default'],
@@ -289,20 +389,21 @@ test('schema mapper optional, defaulted, nullable, auto, and mandatory columns',
 test('repository supports varying projections and preserves database defaults', static function (): void {
     $pdo = new PDO('sqlite::memory:');
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    $pdo->exec("CREATE TABLE cdr (id INTEGER PRIMARY KEY AUTOINCREMENT, accountcode TEXT NOT NULL, src TEXT NOT NULL, optional TEXT NULL, defaulted TEXT NOT NULL DEFAULT 'db')");
+    $pdo->exec("CREATE TABLE cdr (id INTEGER PRIMARY KEY AUTOINCREMENT, accountcode TEXT NOT NULL, src TEXT NOT NULL, userfield TEXT NOT NULL, optional TEXT NULL, defaulted TEXT NOT NULL DEFAULT 'db')");
     $metadata = [
         ['Field' => 'id', 'Extra' => 'auto_increment', 'Null' => 'NO', 'Default' => null],
-        ['Field' => 'accountcode', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
+        ['Field' => 'accountcode', 'Type' => 'varchar(20)', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
         ['Field' => 'src', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
+        ['Field' => 'userfield', 'Type' => 'varchar(255)', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
         ['Field' => 'optional', 'Extra' => '', 'Null' => 'YES', 'Default' => null],
         ['Field' => 'defaulted', 'Extra' => '', 'Null' => 'NO', 'Default' => 'db'],
     ];
     $repository = new CdrRepository($pdo, $metadata);
     assertSame($repository->insertAll([
-        ['accountcode' => 'CCTESTrows', 'src' => 'first'],
-        ['accountcode' => 'CCTESTrows', 'src' => 'second', 'optional' => 'later', 'defaulted' => 'override'],
-        ['accountcode' => 'CCTESTrows', 'src' => 'third', 'optional' => 'first-only'],
-        ['accountcode' => 'CCTESTrows', 'src' => 'fourth'],
+        ['accountcode' => 'CCTEST00000000000001', 'src' => 'first', 'userfield' => 'cdrgen test'],
+        ['accountcode' => 'CCTEST00000000000001', 'src' => 'second', 'userfield' => 'cdrgen test', 'optional' => 'later', 'defaulted' => 'override'],
+        ['accountcode' => 'CCTEST00000000000001', 'src' => 'third', 'userfield' => 'cdrgen test', 'optional' => 'first-only'],
+        ['accountcode' => 'CCTEST00000000000001', 'src' => 'fourth', 'userfield' => 'cdrgen test'],
     ]), 4);
     $rows = $pdo->query('SELECT src, optional, defaulted FROM cdr ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
     assertSame($rows[0], ['src' => 'first', 'optional' => null, 'defaulted' => 'db']);
@@ -334,28 +435,522 @@ test('ordinary generated CDR rows have a uniform schema projection', static func
 test('repository transaction rollback and exact cleanup', static function (): void {
     $pdo = new PDO('sqlite::memory:');
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    $pdo->exec('CREATE TABLE cdr (id INTEGER PRIMARY KEY AUTOINCREMENT, accountcode TEXT NOT NULL, src TEXT NOT NULL)');
+    $pdo->exec('CREATE TABLE cdr (id INTEGER PRIMARY KEY AUTOINCREMENT, accountcode TEXT NOT NULL, src TEXT NOT NULL, userfield TEXT NOT NULL)');
     $metadata = [
         ['Field' => 'id', 'Extra' => 'auto_increment', 'Null' => 'NO', 'Default' => null],
-        ['Field' => 'accountcode', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
+        ['Field' => 'accountcode', 'Type' => 'varchar(20)', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
         ['Field' => 'src', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
+        ['Field' => 'userfield', 'Type' => 'varchar(255)', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
     ];
     $repository = new CdrRepository($pdo, $metadata);
-    assertSame($repository->insertAll([['accountcode' => 'CCTESTrun1', 'src' => '2001']]), 1);
-    $pdo->exec("INSERT INTO cdr(accountcode,src) VALUES ('REAL','9999')");
-    assertSame($repository->cleanup('CCTESTrun1'), 1);
+    assertSame($repository->insertAll([['accountcode' => 'CCTEST00000000000002', 'src' => '2001', 'userfield' => 'cdrgen test']]), 1);
+    $pdo->exec("INSERT INTO cdr(accountcode,src,userfield) VALUES ('REAL','9999','production')");
+    assertSame($repository->cleanup('CCTEST00000000000002'), 1);
     assertSame((int) $pdo->query('SELECT COUNT(*) FROM cdr')->fetchColumn(), 1);
     $pdo->exec("CREATE TRIGGER reject_bad BEFORE INSERT ON cdr WHEN NEW.src = 'bad' BEGIN SELECT RAISE(ABORT, 'bad row'); END");
     try {
         $repository->insertAll([
-            ['accountcode' => 'CCTESTrun2', 'src' => 'good'],
-            ['accountcode' => 'CCTESTrun2', 'src' => 'bad'],
+            ['accountcode' => 'CCTEST00000000000003', 'src' => 'good', 'userfield' => 'cdrgen test'],
+            ['accountcode' => 'CCTEST00000000000003', 'src' => 'bad', 'userfield' => 'cdrgen test'],
         ]);
         throw new RuntimeException('failed insert committed');
     } catch (PDOException $error) {
         // Expected.
     }
-    assertSame((int) $pdo->query("SELECT COUNT(*) FROM cdr WHERE accountcode='CCTESTrun2'")->fetchColumn(), 0);
+    assertSame((int) $pdo->query("SELECT COUNT(*) FROM cdr WHERE accountcode='CCTEST00000000000003'")->fetchColumn(), 0);
+});
+
+test('accountcodes fit varchar 20 with stable deterministic identity', static function (): void {
+    $seen = [];
+    for ($index = 0; $index < 128; $index++) {
+        $accountcode = AccountcodePolicy::random();
+        assertSame(strlen($accountcode), 20);
+        assertTrue(preg_match('/^CCTEST[0-9a-f]{14}$/D', $accountcode) === 1);
+        $seen[$accountcode] = true;
+    }
+    assertSame(count($seen), 128, 'random run identities unexpectedly collided in test sample');
+    $fixture = AccountcodePolicy::deterministic('scenario-one');
+    assertSame(strlen($fixture), 20);
+    assertSame($fixture, AccountcodePolicy::deterministic('scenario-one'));
+    assertTrue($fixture !== AccountcodePolicy::deterministic('scenario-two'));
+
+    $pdo = safetyDatabase();
+    $repository = new CdrRepository($pdo, safetyMetadata(20));
+    $repository->insertAll([['accountcode' => $fixture, 'src' => '2001', 'userfield' => 'cdrgen test']]);
+    assertSame($pdo->query('SELECT accountcode FROM cdr')->fetchColumn(), $fixture);
+    $repository->cleanup($fixture);
+});
+
+test('accountcode capacity and bounded strings fail before writing', static function (): void {
+    $pdo = safetyDatabase();
+    $repository = new CdrRepository($pdo, safetyMetadata(19));
+    try {
+        $repository->insertAll([['accountcode' => AccountcodePolicy::random(), 'src' => '2001']]);
+        throw new RuntimeException('short accountcode schema accepted');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'cannot safely hold') !== false);
+    }
+    assertSame((int) $pdo->query('SELECT COUNT(*) FROM cdr')->fetchColumn(), 0);
+
+    $withoutMarker = array_values(array_filter(safetyMetadata(), static function (array $column): bool {
+        return $column['Field'] !== 'userfield';
+    }));
+    try {
+        (new CdrRepository($pdo, $withoutMarker))->assertSchemaSafe();
+        throw new RuntimeException('live schema without recovery marker accepted');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'power-loss recovery') !== false);
+    }
+
+    $mapper = new SchemaMapper();
+    try {
+        $mapper->projection([
+            ['Field' => 'accountcode', 'Type' => 'varchar(20)', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
+            ['Field' => 'src', 'Type' => 'varchar(3)', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
+        ], ['accountcode' => AccountcodePolicy::random(), 'src' => '2001']);
+        throw new RuntimeException('oversized string accepted');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'possible truncation') !== false);
+    }
+    try {
+        $mapper->projection([
+            ['Field' => 'accountcode', 'Type' => 'varchar(20)', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
+            ['Field' => 'src', 'Type' => 'varchar(2)', 'Extra' => '', 'Null' => 'NO', 'Default' => null],
+        ], ['accountcode' => AccountcodePolicy::random(), 'src' => 'éé']);
+        throw new RuntimeException('conservative multibyte bound was not enforced');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'possible truncation') !== false);
+    }
+});
+
+test('transactional storage policy accepts SQLite and InnoDB only', static function (): void {
+    TransactionalStoragePolicy::assertSupported('sqlite');
+    TransactionalStoragePolicy::assertSupported('mysql', 'InnoDB');
+    TransactionalStoragePolicy::assertSupported('mysql', 'innodb');
+
+    foreach (['MyISAM', 'MEMORY', '', null, 'unknown'] as $engine) {
+        try {
+            TransactionalStoragePolicy::assertSupported('mysql', $engine);
+            throw new RuntimeException('unsafe MySQL engine accepted: ' . var_export($engine, true));
+        } catch (RuntimeException $error) {
+            assertTrue(strpos($error->getMessage(), 'requires InnoDB') !== false);
+        }
+    }
+    try {
+        TransactionalStoragePolicy::assertSupported('pgsql');
+        throw new RuntimeException('unsupported PDO driver accepted');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'Unsupported PDO driver') !== false);
+    }
+
+    $repository = new CdrRepository(safetyDatabase(), safetyMetadata());
+    $repository->assertTransactionalStorage();
+});
+
+test('transactional storage failure occurs before generated insertion begins', static function (): void {
+    $pdo = (new ReflectionClass(PDO::class))->newInstanceWithoutConstructor();
+    $repository = new CdrRepository($pdo, safetyMetadata());
+    try {
+        $repository->insertAll([[
+            'accountcode' => AccountcodePolicy::random(),
+            'src' => '2001',
+            'userfield' => 'cdrgen test',
+        ]]);
+        throw new RuntimeException('insert proceeded without established transactional storage');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'transactional rollback safety') !== false);
+    }
+});
+
+test('exact identity verification rolls back simulated silent truncation', static function (): void {
+    $pdo = safetyDatabase();
+    $pdo->exec(
+        "CREATE TRIGGER truncate_account AFTER INSERT ON cdr "
+        . "BEGIN UPDATE cdr SET accountcode = substr(NEW.accountcode, 1, 19) WHERE id = NEW.id; END"
+    );
+    $repository = new CdrRepository($pdo, safetyMetadata());
+    $accountcode = AccountcodePolicy::random();
+    try {
+        $repository->insertAll([
+            ['accountcode' => $accountcode, 'src' => '2001'],
+            ['accountcode' => $accountcode, 'src' => '2002'],
+        ]);
+        throw new RuntimeException('silently truncated transaction committed');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'verification failed') !== false);
+    }
+    assertSame((int) $pdo->query('SELECT COUNT(*) FROM cdr')->fetchColumn(), 0);
+});
+
+test('byte-exact marker verification rolls back hostile userfield mutation', static function (): void {
+    $pdo = safetyDatabase();
+    $pdo->exec(
+        "CREATE TRIGGER mutate_marker AFTER INSERT ON cdr "
+        . "BEGIN UPDATE cdr SET userfield = 'CDRGEN hostile' WHERE id = NEW.id; END"
+    );
+    $repository = new CdrRepository($pdo, safetyMetadata());
+    $accountcode = AccountcodePolicy::random();
+    try {
+        $repository->insertAll([
+            ['accountcode' => $accountcode, 'src' => '2001', 'userfield' => 'cdrgen expected'],
+            ['accountcode' => $accountcode, 'src' => '2002', 'userfield' => 'cdrgen expected'],
+        ]);
+        throw new RuntimeException('mutated recovery markers committed');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'marker verification failed') !== false);
+    }
+    assertSame((int) $pdo->query('SELECT COUNT(*) FROM cdr')->fetchColumn(), 0);
+});
+
+test('cleanup is exact, verified, idempotent, and rejects invalid input', static function (): void {
+    $pdo = safetyDatabase();
+    $repository = new CdrRepository($pdo, safetyMetadata());
+    $target = AccountcodePolicy::deterministic('cleanup-target');
+    $other = AccountcodePolicy::deterministic('cleanup-other');
+    $repository->insertAll([['accountcode' => $target, 'src' => '2001', 'userfield' => 'cdrgen test']]);
+    $pdo->prepare('INSERT INTO cdr(accountcode, src) VALUES (:accountcode, :src)')
+        ->execute([':accountcode' => $other, ':src' => '2002']);
+    assertSame($repository->cleanup($target), 1);
+    assertSame($repository->cleanup($target), 0);
+    assertSame($repository->countExact($other), 1);
+    try {
+        $repository->cleanup('CCTEST%');
+        throw new RuntimeException('unsafe cleanup input accepted');
+    } catch (InvalidArgumentException $error) {
+        assertSame($repository->countExact($other), 1);
+    }
+});
+
+test('cleanup verification fails when a database leaves the exact row behind', static function (): void {
+    $pdo = safetyDatabase();
+    $repository = new CdrRepository($pdo, safetyMetadata());
+    $accountcode = AccountcodePolicy::deterministic('undeletable-row');
+    $repository->insertAll([['accountcode' => $accountcode, 'src' => '2001', 'userfield' => 'cdrgen test']]);
+    $pdo->exec(
+        "CREATE TRIGGER restore_deleted AFTER DELETE ON cdr "
+        . "BEGIN INSERT INTO cdr(accountcode, src) VALUES (OLD.accountcode, OLD.src); END"
+    );
+    try {
+        $repository->cleanup($accountcode);
+        throw new RuntimeException('unverified cleanup reported success');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'Cleanup verification failed') !== false);
+    }
+    assertSame($repository->countExact($accountcode), 1);
+});
+
+test('live guard recovers stale runs and refuses an unexpected dirty database', static function (): void {
+    $directory = sys_get_temp_dir() . '/cdrgen-test-' . bin2hex(random_bytes(6));
+    mkdir($directory, 0700, true);
+    $pdo = safetyDatabase();
+    $repository = new CdrRepository($pdo, safetyMetadata());
+    $store = new ActiveRunStore($directory . '/active-run.json');
+    $stale = AccountcodePolicy::deterministic('stale-run');
+    $store->write($stale, false);
+    $pdo->prepare('INSERT INTO cdr(accountcode, src) VALUES (:accountcode, :src)')
+        ->execute([':accountcode' => $stale, ':src' => '2001']);
+    $guard = new LiveRunGuard($repository, $store);
+    assertSame($guard->recoverAndRequireClean(), [$stale => 'recovery-record']);
+    assertSame($repository->generatedCounts(), []);
+    assertTrue(!is_file($directory . '/active-run.json'));
+
+    $dirty = AccountcodePolicy::deterministic('unexpected-dirty');
+    $pdo->prepare('INSERT INTO cdr(accountcode, src) VALUES (:accountcode, :src)')
+        ->execute([':accountcode' => $dirty, ':src' => '2002']);
+    try {
+        $guard->recoverAndRequireClean();
+        throw new RuntimeException('dirty database accepted');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), $dirty . '=1') !== false);
+    }
+    $repository->cleanup($dirty);
+    rmdir($directory);
+});
+
+test('database markers recover power-loss orphans without a sidecar', static function (): void {
+    $directory = sys_get_temp_dir() . '/cdrgen-test-' . bin2hex(random_bytes(6));
+    mkdir($directory, 0700, true);
+    $pdo = safetyDatabase();
+    $repository = new CdrRepository($pdo, safetyMetadata());
+    $store = new ActiveRunStore($directory . '/active-run.json');
+    $orphan = AccountcodePolicy::deterministic('power-loss-orphan');
+    $statement = $pdo->prepare(
+        'INSERT INTO cdr(accountcode, src, userfield) VALUES (:accountcode, :src, :userfield)'
+    );
+    foreach (['2001', '2002'] as $source) {
+        $statement->execute([
+            ':accountcode' => $orphan,
+            ':src' => $source,
+            ':userfield' => 'cdrgen inbound direct',
+        ]);
+    }
+    $guard = new LiveRunGuard($repository, $store);
+    assertSame($guard->recoverAndRequireClean(), [$orphan => 'database-marker:2']);
+    assertSame($repository->generatedCounts(), []);
+
+    $uppercase = AccountcodePolicy::deterministic('uppercase-marker');
+    $mixedCase = AccountcodePolicy::deterministic('mixed-case-marker');
+    $partiallyMarked = AccountcodePolicy::deterministic('partially-marked');
+    foreach ([
+        [$uppercase, '2003', 'CDRGEN something'],
+        [$mixedCase, '2004', 'CdrGen something'],
+        [$partiallyMarked, '2005', 'cdrgen something'],
+        [$partiallyMarked, '2006', 'CDRGEN something'],
+    ] as [$accountcode, $source, $userfield]) {
+        $statement->execute([
+            ':accountcode' => $accountcode,
+            ':src' => $source,
+            ':userfield' => $userfield,
+        ]);
+    }
+    try {
+        $guard->recoverAndRequireClean();
+        throw new RuntimeException('non-exact database markers were automatically deleted');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), $uppercase . '=1') !== false);
+        assertTrue(strpos($error->getMessage(), $mixedCase . '=1') !== false);
+        assertTrue(strpos($error->getMessage(), $partiallyMarked . '=2') !== false);
+    }
+    assertSame($repository->countExact($uppercase), 1);
+    assertSame($repository->countExact($mixedCase), 1);
+    assertSame($repository->countExact($partiallyMarked), 2);
+    $repository->cleanup($uppercase);
+    $repository->cleanup($mixedCase);
+    $repository->cleanup($partiallyMarked);
+    rmdir($directory);
+});
+
+test('temporary interruption cleans while explicit retention alone preserves', static function (): void {
+    $directory = sys_get_temp_dir() . '/cdrgen-test-' . bin2hex(random_bytes(6));
+    mkdir($directory, 0700, true);
+    $pdo = safetyDatabase();
+    $repository = new CdrRepository($pdo, safetyMetadata());
+    $store = new ActiveRunStore($directory . '/active-run.json');
+
+    $temporary = AccountcodePolicy::deterministic('interrupted-temporary');
+    $guard = new LiveRunGuard($repository, $store);
+    $guard->prepare($temporary, false);
+    $guard->armCleanup();
+    $repository->insertAll([['accountcode' => $temporary, 'src' => '2001', 'userfield' => 'cdrgen test']]);
+    $guard->emergencyCleanup();
+    assertSame($repository->generatedCounts(), []);
+    assertTrue(!is_file($directory . '/active-run.json'));
+
+    $retained = AccountcodePolicy::deterministic('explicit-retention');
+    $guard = new LiveRunGuard($repository, $store);
+    $guard->prepare($retained, true);
+    $guard->armCleanup();
+    $repository->insertAll([['accountcode' => $retained, 'src' => '2002', 'userfield' => 'cdrgen test']]);
+    $guard->emergencyCleanup();
+    assertSame($repository->countExact($retained), 1);
+    assertTrue(is_file($directory . '/active-run.json'));
+
+    $nextRun = new LiveRunGuard($repository, $store);
+    assertSame($nextRun->recoverAndRequireClean(), [$retained => 'recovery-record']);
+    assertSame($repository->generatedCounts(), []);
+    rmdir($directory);
+});
+
+test('live guard boundaries are either empty or exactly recoverable', static function (): void {
+    $directory = sys_get_temp_dir() . '/cdrgen-test-' . bin2hex(random_bytes(6));
+    mkdir($directory, 0700, true);
+    $pdo = safetyDatabase();
+    $repository = new CdrRepository($pdo, safetyMetadata());
+    $store = new ActiveRunStore($directory . '/active-run.json');
+
+    // After prepare and before arming: no rows, durable exact recovery identity.
+    $beforeArm = AccountcodePolicy::deterministic('before-arm');
+    $guard = new LiveRunGuard($repository, $store);
+    $guard->prepare($beforeArm, false);
+    $guard->emergencyCleanup();
+    assertSame($repository->generatedCounts(), []);
+    assertTrue(is_file($store->path()));
+    assertSame((new LiveRunGuard($repository, $store))->recoverAndRequireClean(), [
+        $beforeArm => 'recovery-record',
+    ]);
+
+    // After arming and before beginTransaction: cleanup is safe and idempotent.
+    $beforeBegin = AccountcodePolicy::deterministic('before-begin');
+    $guard = new LiveRunGuard($repository, $store);
+    $guard->prepare($beforeBegin, false);
+    $guard->armCleanup();
+    $guard->emergencyCleanup();
+    $guard->emergencyCleanup();
+    assertSame($repository->generatedCounts(), []);
+    assertTrue(!is_file($store->path()));
+
+    // During the insertion transaction / immediately before commit.
+    $duringTransaction = AccountcodePolicy::deterministic('during-transaction');
+    $guard = new LiveRunGuard($repository, $store);
+    $guard->prepare($duringTransaction, false);
+    $guard->armCleanup();
+    $pdo->beginTransaction();
+    $statement = $pdo->prepare('INSERT INTO cdr(accountcode, src, userfield) VALUES (?, ?, ?)');
+    $statement->execute([$duringTransaction, '2001', 'cdrgen boundary-test']);
+    $guard->emergencyCleanup();
+    $pdo->commit();
+    assertSame($repository->generatedCounts(), []);
+    assertTrue(!is_file($store->path()));
+
+    // Immediately after commit / after insertAll returns.
+    $afterCommit = AccountcodePolicy::deterministic('after-commit');
+    $guard = new LiveRunGuard($repository, $store);
+    $guard->prepare($afterCommit, false);
+    $guard->armCleanup();
+    $repository->insertAll([[
+        'accountcode' => $afterCommit,
+        'src' => '2002',
+        'userfield' => 'cdrgen boundary-test',
+    ]]);
+    $guard->emergencyCleanup();
+    assertSame($repository->generatedCounts(), []);
+    assertTrue(!is_file($store->path()));
+
+    // After database cleanup but before recovery-record removal, startup can
+    // safely repeat exact cleanup and then clear the sidecar.
+    $afterDatabaseCleanup = AccountcodePolicy::deterministic('after-database-cleanup');
+    $guard = new LiveRunGuard($repository, $store);
+    $guard->prepare($afterDatabaseCleanup, false);
+    $guard->armCleanup();
+    $repository->insertAll([[
+        'accountcode' => $afterDatabaseCleanup,
+        'src' => '2003',
+        'userfield' => 'cdrgen boundary-test',
+    ]]);
+    $repository->cleanup($afterDatabaseCleanup);
+    assertTrue(is_file($store->path()));
+    assertSame((new LiveRunGuard($repository, $store))->recoverAndRequireClean(), [
+        $afterDatabaseCleanup => 'recovery-record',
+    ]);
+    assertSame($repository->generatedCounts(), []);
+    assertTrue(!is_file($store->path()));
+    rmdir($directory);
+});
+
+test('real SIGINT, SIGTERM, and SIGHUP callbacks clean rows and recovery state', static function (): void {
+    requireSignalSupport();
+    foreach ([SIGINT, SIGTERM, SIGHUP] as $signal) {
+        [$exitCode, $rows, $stateExists, $stderr, $directory, $database] = runSignalWorker('temporary', $signal);
+        assertSame($exitCode, 128 + $signal);
+        assertSame($rows, 0, 'signal left temporary rows behind');
+        assertTrue(!$stateExists, 'signal removed rows but left recovery state');
+        assertSame($stderr, '');
+        removeSignalArtifacts($directory, $database);
+    }
+});
+
+test('live signal support is required fail-closed', static function (): void {
+    if (function_exists('pcntl_signal') && function_exists('pcntl_async_signals')) {
+        SignalCleanup::assertSupported();
+        return;
+    }
+    try {
+        SignalCleanup::assertSupported();
+        throw new RuntimeException('live mode accepted missing pcntl support');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'requires the PHP pcntl extension') !== false);
+    }
+});
+
+test('real signal honors explicit retention and preserves recovery state', static function (): void {
+    requireSignalSupport();
+    [$exitCode, $rows, $stateExists, $stderr, $directory, $database] = runSignalWorker('keep', SIGINT);
+    assertSame($exitCode, 128 + SIGINT);
+    assertSame($rows, 1);
+    assertTrue($stateExists);
+    assertSame($stderr, '');
+    removeSignalArtifacts($directory, $database);
+});
+
+test('real signal cleanup failure is nonzero and preserves recovery state', static function (): void {
+    requireSignalSupport();
+    [$exitCode, $rows, $stateExists, $stderr, $directory, $database, $accountcode]
+        = runSignalWorker('failure', SIGTERM);
+    assertSame($exitCode, 1);
+    assertSame($rows, 1);
+    assertTrue($stateExists);
+    assertTrue(strpos($stderr, $accountcode) !== false);
+    assertTrue(strpos($stderr, 'Recovery record:') !== false);
+    removeSignalArtifacts($directory, $database);
+});
+
+test('concurrent live process locks are rejected', static function (): void {
+    $directory = sys_get_temp_dir() . '/cdrgen-test-' . bin2hex(random_bytes(6));
+    mkdir($directory, 0700, true);
+    $path = $directory . '/live.lock';
+    $first = ProcessLock::acquire($path);
+    try {
+        ProcessLock::acquire($path);
+        throw new RuntimeException('concurrent lock accepted');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'already holds') !== false);
+    }
+    $first->release();
+    $second = ProcessLock::acquire($path);
+    $second->release();
+    unlink($path);
+    rmdir($directory);
+});
+
+test('state paths reject insecure permissions, symlinks, and non-regular files', static function (): void {
+    $base = sys_get_temp_dir() . '/cdrgen-test-' . bin2hex(random_bytes(6));
+    mkdir($base, 0700, true);
+    $insecure = $base . '/insecure';
+    mkdir($insecure, 0770);
+    chmod($insecure, 0770);
+    try {
+        StateDirectory::ensureSecure($insecure);
+        throw new RuntimeException('group-writable state directory accepted');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'mode 0700') !== false);
+    }
+    $target = $base . '/target';
+    file_put_contents($target, 'protected');
+    $link = $base . '/live-run.lock';
+    symlink($target, $link);
+    try {
+        StateDirectory::assertRegularOrAbsent($link, 'process lock');
+        throw new RuntimeException('symlink lock accepted');
+    } catch (RuntimeException $error) {
+        assertTrue(strpos($error->getMessage(), 'symlink') !== false);
+    }
+    assertSame(file_get_contents($target), 'protected');
+    unlink($link);
+    unlink($target);
+    rmdir($insecure);
+    rmdir($base);
+});
+
+test('installer rejects a state-directory symlink without modifying its target', static function (): void {
+    $base = sys_get_temp_dir() . '/cdrgen-install-' . bin2hex(random_bytes(6));
+    $target = $base . '/target';
+    $statePath = $base . '/state';
+    mkdir($target, 0755, true);
+    file_put_contents($target . '/sentinel', 'unchanged');
+    $targetMode = fileperms($target) & 0777;
+    symlink($target, $statePath);
+
+    $script = file_get_contents(__DIR__ . '/../install.sh');
+    $script = str_replace('STATE_DIR="/var/lib/cdrgen"', 'STATE_DIR=' . escapeshellarg($statePath), $script);
+    $script = str_replace('[ "$(id -u)" -ne 0 ]', '[ 0 -ne 0 ]', $script);
+    $installer = $base . '/install.sh';
+    file_put_contents($installer, $script);
+    file_put_contents($base . '/cdrgen.php', 'fixture');
+
+    $output = [];
+    $status = 0;
+    exec('bash ' . escapeshellarg($installer) . ' 2>&1', $output, $status);
+    assertTrue($status !== 0, 'installer accepted a state-directory symlink');
+    assertTrue(strpos(implode("\n", $output), 'must not be a symlink') !== false);
+    assertSame(file_get_contents($target . '/sentinel'), 'unchanged');
+    assertSame(fileperms($target) & 0777, $targetMode);
+
+    unlink($installer);
+    unlink($base . '/cdrgen.php');
+    unlink($statePath);
+    unlink($target . '/sentinel');
+    rmdir($target);
+    rmdir($base);
 });
 
 test('FreePBX connection settings preserve CDR and AMP fallbacks and ports', static function (): void {
@@ -385,7 +980,7 @@ test('dataset and run accountcode identities remain separate', static function (
         assertSame($row, $secondRows[$index]);
     }
     $random = RunIdentity::randomAccountcode();
-    assertTrue(preg_match('/^CCTEST[0-9a-f]{16}$/', $random) === 1, 'normal run tag shape is weak or invalid');
+    assertTrue(preg_match('/^CCTEST[0-9a-f]{14}$/', $random) === 1, 'normal run tag shape is weak or invalid');
     $light = fixtureRequest(9, 20)->datasetIdentity();
     $differentRange = new GenerationRequest(
         TrafficProfile::named('light'), 100, 200, new SeededRandomSource(9),
@@ -406,7 +1001,7 @@ test('CLI help and restored wizard contracts are present', static function (): v
     $source = file_get_contents(__DIR__ . '/../cdrgen.php');
     foreach (['Use profile default', 'Custom range', 'Use configured FreePBX trunks',
         'Specify trunks explicitly', 'CDR-only fake trunks', 'FAKE', 'QUIT',
-        'About to generate', 'DELETE or KEEP'] as $phrase) {
+        'About to generate', '--keep'] as $phrase) {
         assertTrue(strpos($source, $phrase) !== false, 'wizard contract missing ' . $phrase);
     }
 });
@@ -444,16 +1039,20 @@ test('FreePBX bootstrap globals cannot overwrite CDRgen timezone state', static 
 });
 
 $failures = 0;
+$skipped = 0;
 $started = microtime(true);
 foreach ($tests as $name => $callback) {
     try {
         $callback();
         echo "PASS {$name}\n";
+    } catch (SkipTest $error) {
+        $skipped++;
+        echo "SKIP {$name}: {$error->getMessage()}\n";
     } catch (Throwable $error) {
         $failures++;
         echo "FAIL {$name}: {$error->getMessage()}\n";
     }
 }
-echo "\n" . count($tests) . " tests, {$failures} failures, "
+echo "\n" . count($tests) . " tests, {$failures} failures, {$skipped} skipped, "
     . number_format(microtime(true) - $started, 3) . "s\n";
 exit($failures === 0 ? 0 : 1);

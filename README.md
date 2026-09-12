@@ -6,13 +6,19 @@ Core version: `1.1.0-dev`. `CdrGen\Version::BASE_REVISION` records the reviewed 
 
 ## Safety
 
-The normal CLI bootstraps FreePBX and inserts synthetic rows in a transaction. Every database run gets a cryptographically random 64-bit `CCTEST` suffix (for example, `CCTEST0123456789abcdef`). This is a strong practical identifier, not a mathematical uniqueness guarantee. The final prompt can delete only that exact accountcode; `KEEP` retains it. To remove one retained run:
+The normal CLI bootstraps FreePBX and inserts synthetic rows in a transaction. Live generation requires the `asteriskcdrdb.cdr` table to use InnoDB; CDRgen verifies the active table engine immediately before insertion and does not alter or convert it automatically. This requirement makes rollback reliable when pre-commit safety verification fails. Every database run gets a cryptographically random 56-bit suffix: `CCTEST` plus exactly 14 lowercase hexadecimal characters, for example `CCTEST0123456789ab`. This fills, but never exceeds, the common FreePBX `varchar(20)` accountcode. The installed schema is inspected before every live write; a shorter or unbounded/non-CHAR accountcode definition is rejected.
+
+Live runs are temporary by default. After reporting, CDRgen deletes only the exact run accountcode and verifies both that the run has zero rows and that no other `CCTEST` rows remain. There is no interactive KEEP choice. Specialist development retention requires `--keep` before generation. To remove one deliberately retained run manually:
 
 ```sql
-DELETE FROM cdr WHERE accountcode = 'CCTEST0123456789abcdef';
+DELETE FROM cdr WHERE accountcode = 'CCTEST0123456789ab';
 ```
 
-An interruption after commit but before cleanup leaves recognisably tagged rows. Find them with `WHERE accountcode LIKE 'CCTEST%'`, inspect them, and delete only the intended exact tag. CDRgen never alters the CDR schema. Use `--dry-run` for generation without FreePBX or database access.
+Before commit, CDRgen queries the exact accountcode inside the transaction and requires the expected row count, catching silent database truncation. Live mode requires PHP `pcntl`; SIGINT, SIGTERM, SIGHUP, and PHP shutdown paths attempt verified cleanup for temporary runs. The root-owned `/var/lib/cdrgen/active-run.json` sidecar is written atomically and fsynced when the PHP runtime supports it, but filesystem rename is not treated as a power-loss guarantee.
+
+Power-loss recovery is independently anchored in the CDR database. Live mode requires a `userfield` column capable of storing CDRgen's marker. A strict new-format accountcode is automatically recoverable without a sidecar only when every row under that exact accountcode also has that marker. Each positively identified run is deleted by exact byte identity and verified separately. Ambiguous, malformed, partially marked, or legacy rows are reported and block startup rather than being deleted. A root-owned process lock prevents concurrent live runs.
+
+CDRgen refuses to start a new live dataset if unexpected `CCTEST` rows exist. It reports each exact accountcode and count and never performs a broad `DELETE LIKE 'CCTEST%'`. Recovery records authorize only their single validated exact accountcode. If verified cleanup cannot complete, the recovery record remains and CDRgen exits non-zero with manual recovery details. `/var/lib/cdrgen` must be `root:root` mode `0700`; lock and recovery paths must be regular, administrator-owned files and may not be symlinks. Use `--dry-run` for generation without FreePBX, locks, recovery files, or database access.
 
 CDRgen models realistic reporting data, not complete Asterisk signalling, CEL events, every multi-CDR topology, or every production dialplan application. Run it on a test PBX and review generated data before relying on a validation result.
 
@@ -64,13 +70,14 @@ Options:
 --fake-trunks=N
 --concurrency-semantics=answered|cdr
 --fixture-accountcode
+--keep
 --dry-run
 --help
 ```
 
 Running without arguments retains an interactive profile/seed/trunk confirmation workflow. Automatic discovery ignores disabled FreePBX trunks when the schema exposes that flag. Fake trunks exist only in CDR data and may not appear in reports that require configured FreePBX trunks.
 
-`--fixture-accountcode` is deliberately separate from `--seed` and is intended only for disposable fixtures. Its tag derives from the complete canonical dataset identity, so different profiles, ranges, or inventories sharing a seed do not share a cleanup tag. Normal runs receive fresh cryptographically random tags.
+`--fixture-accountcode` is deliberately separate from `--seed` and is intended only for disposable fixtures. Its 20-character tag derives from the complete canonical dataset identity, so different profiles, ranges, or inventories sharing a seed do not share a cleanup tag. Normal runs receive fresh cryptographically random tags. `--keep` is the only way a completed live run deliberately remains after CDRgen exits; its recovery record ensures a later live invocation cleans it before generating again.
 
 ## Reproducibility
 
@@ -96,7 +103,7 @@ $request = new CdrGen\GenerationRequest(
     $random,
     ['2001', '2002', '2010'],
     $profiledTrunks,
-    ['timezone' => 'UTC', 'accountcode' => 'CCTESTfixture']
+    ['timezone' => 'UTC', 'accountcode' => 'CCTEST0123456789ab']
 );
 
 $result = (new CdrGen\Generator())->generate($request);
@@ -123,7 +130,7 @@ Output includes global, per-trunk, per-extension handled-call, and per-extension
 
 ## Schema and insertion
 
-The generator always creates the complete logical row. `SchemaMapper` projects only fields supported by `SHOW COLUMNS` metadata, omits auto-increment columns, and permits missing nullable/defaulted optional columns. It rejects an unknown mandatory column rather than fabricating misleading empty, zero, or current-time values. `CdrRepository` uses prepared statements, inserts the run in one transaction, rolls back on error, and reports only the committed count. Cleanup accepts only an exact `CCTEST` accountcode.
+The generator always creates the complete logical row. `SchemaMapper` projects only fields supported by `SHOW COLUMNS` metadata, omits auto-increment columns, and permits missing nullable/defaulted optional columns. It rejects unknown mandatory columns and values whose byte length exceeds discovered CHAR/VARCHAR bounds rather than relying on SQL strict mode. This byte-based check is intentionally conservative on multibyte UTF-8 schemas because basic `SHOW COLUMNS` metadata does not prove the active character repertoire; it may reject a representable non-ASCII value but cannot permit silent truncation. `CdrRepository` uses prepared statements and verifies both the exact accountcode row count and byte-exact recovery marker count before committing. MySQL/MariaDB writes require a positively identified InnoDB `cdr` table at the write boundary because these verification guarantees depend on real transactional rollback; CDRgen never converts the table automatically. Cleanup accepts only the full `CCTEST` plus 14-hex shape and verifies zero afterwards.
 
 ## Testing and development
 
@@ -144,7 +151,7 @@ git clone https://github.com/kierknoby/cdrgen.git ~/cdrgen
 sudo ~/cdrgen/install.sh
 ```
 
-The installer makes `cdrgen.php` executable and links it as `/usr/local/bin/cdrgen`.
+The installer makes `cdrgen.php` executable, links it as `/usr/local/bin/cdrgen`, and creates `/var/lib/cdrgen` as `root:root` mode `0700` for the live-run lock and recovery record. Live CDRgen is therefore an administrative command; the Asterisk service account receives no write access to trusted safety state.
 
 ## Licence
 
