@@ -20,145 +20,145 @@ use CdrGen\TrafficProfile;
 use CdrGen\TrunkProfiler;
 use CdrGen\Version;
 
-$longOptions = [
+$cdrgenLongOptions = [
     'profile::', 'seed::', 'rows::', 'start::', 'end::',
     'trunks::', 'fake-trunks::', 'concurrency-semantics::',
     'timezone::', 'dry-run', 'fixture-accountcode', 'help',
 ];
-$options = $argc === 1 ? runWizard() : getopt('', $longOptions);
-if (isset($options['help'])) {
+$cdrgenOptions = $argc === 1 ? runWizard() : getopt('', $cdrgenLongOptions);
+if (isset($cdrgenOptions['help'])) {
     usage(0);
 }
 
-$profileName = (string) ($options['profile'] ?? 'light');
+$cdrgenProfileName = (string) ($cdrgenOptions['profile'] ?? 'light');
 try {
-    $profile = TrafficProfile::named($profileName);
+    $cdrgenProfile = TrafficProfile::named($cdrgenProfileName);
 } catch (Throwable $error) {
     fail('--profile must be light, medium, or heavy');
 }
-$rows = isset($options['rows'])
-    ? parsePositiveInt($options['rows'], '--rows')
-    : $profile->rows();
-$seed = isset($options['seed'])
-    ? parseInt($options['seed'], '--seed')
+$cdrgenRows = isset($cdrgenOptions['rows'])
+    ? parsePositiveInt($cdrgenOptions['rows'], '--rows')
+    : $cdrgenProfile->rows();
+$cdrgenSeed = isset($cdrgenOptions['seed'])
+    ? parseInt($cdrgenOptions['seed'], '--seed')
     : random_int(1, 0x7fffffff);
-$timezoneName = (string) ($options['timezone'] ?? date_default_timezone_get());
+$cdrgenTimezoneName = (string) ($cdrgenOptions['timezone'] ?? date_default_timezone_get());
 try {
-    $timezone = new DateTimeZone($timezoneName);
+    $cdrgenTimezone = new DateTimeZone($cdrgenTimezoneName);
 } catch (Throwable $error) {
     fail('--timezone is not a valid timezone identifier');
 }
-$end = isset($options['end'])
-    ? parseDateTime((string) $options['end'], $timezone, '--end')
+$cdrgenEnd = isset($cdrgenOptions['end'])
+    ? parseDateTime((string) $cdrgenOptions['end'], $cdrgenTimezone, '--end')
     : time();
-$start = isset($options['start'])
-    ? parseDateTime((string) $options['start'], $timezone, '--start')
-    : $end - $profile->days() * 86400;
-if ($start >= $end) {
+$cdrgenStart = isset($cdrgenOptions['start'])
+    ? parseDateTime((string) $cdrgenOptions['start'], $cdrgenTimezone, '--start')
+    : $cdrgenEnd - $cdrgenProfile->days() * 86400;
+if ($cdrgenStart >= $cdrgenEnd) {
     fail('--start must be earlier than --end');
 }
-$semantics = (string) ($options['concurrency-semantics'] ?? ConcurrencySemantics::ANSWERED_MEDIA);
+$cdrgenSemantics = (string) ($cdrgenOptions['concurrency-semantics'] ?? ConcurrencySemantics::ANSWERED_MEDIA);
 try {
-    ConcurrencySemantics::validate($semantics);
+    ConcurrencySemantics::validate($cdrgenSemantics);
 } catch (Throwable $error) {
     fail($error->getMessage());
 }
 
-$scenarioRandom = new SeededRandomSource($seed);
-$profilingRandom = $scenarioRandom->fork('trunk-profiling-v1');
-$profiler = new TrunkProfiler();
-$cdrPdo = null;
-$metadata = [];
+$cdrgenScenarioRandom = new SeededRandomSource($cdrgenSeed);
+$cdrgenProfilingRandom = $cdrgenScenarioRandom->fork('trunk-profiling-v1');
+$cdrgenProfiler = new TrunkProfiler();
+$cdrgenCdrPdo = null;
+$cdrgenMetadata = [];
 
-if (isset($options['dry-run'])) {
-    $explicit = (string) ($options['trunks'] ?? 'PJSIP/Primary-In,PJSIP/Primary-Out,SIP/Failover-Test');
-    $trunks = profilesFromList($explicit, $profiler, $profilingRandom);
-    if (isset($options['fake-trunks'])) {
-        $trunks = array_merge(
-            $trunks,
-            fakeTrunkProfiles(parsePositiveInt($options['fake-trunks'], '--fake-trunks'), $profiler, $profilingRandom)
+if (isset($cdrgenOptions['dry-run'])) {
+    $cdrgenExplicitTrunks = (string) ($cdrgenOptions['trunks'] ?? 'PJSIP/Primary-In,PJSIP/Primary-Out,SIP/Failover-Test');
+    $cdrgenTrunks = profilesFromList($cdrgenExplicitTrunks, $cdrgenProfiler, $cdrgenProfilingRandom);
+    if (isset($cdrgenOptions['fake-trunks'])) {
+        $cdrgenTrunks = array_merge(
+            $cdrgenTrunks,
+            fakeTrunkProfiles(parsePositiveInt($cdrgenOptions['fake-trunks'], '--fake-trunks'), $cdrgenProfiler, $cdrgenProfilingRandom)
         );
     }
 } else {
     $bootstrap_settings['freepbx_auth'] = false;
     require_once '/etc/freepbx.conf';
-    $cdrPdo = connectCdrPdo($amp_conf ?? []);
+    $cdrgenCdrPdo = connectCdrPdo($amp_conf ?? []);
     try {
-        $configPdo = connectConfigPdo($amp_conf ?? []);
+        $cdrgenConfigPdo = connectConfigPdo($amp_conf ?? []);
     } catch (Throwable $error) {
-        $configPdo = $cdrPdo;
+        $cdrgenConfigPdo = $cdrgenCdrPdo;
     }
-    $trunks = resolveTrunks($configPdo, $options, $profiler, $profilingRandom);
-    $metadata = loadCdrColumns($cdrPdo);
+    $cdrgenTrunks = resolveTrunks($cdrgenConfigPdo, $cdrgenOptions, $cdrgenProfiler, $cdrgenProfilingRandom);
+    $cdrgenMetadata = loadCdrColumns($cdrgenCdrPdo);
 }
 
-if ($trunks === []) {
+if ($cdrgenTrunks === []) {
     fail('At least one trunk is required');
 }
 
-$extensions = ['2001', '2002', '2003', '2004', '2005', '2010', '2011', '2020', '2100', '2200'];
-$extensionNames = [
+$cdrgenExtensions = ['2001', '2002', '2003', '2004', '2005', '2010', '2011', '2020', '2100', '2200'];
+$cdrgenExtensionNames = [
     '2001' => 'Alice Nguyen', '2002' => 'Ben Carter', '2003' => 'Carla Singh',
     '2004' => 'Diego Martinez', '2005' => 'Evelyn Brooks', '2010' => 'Front Desk',
     '2011' => 'Support Desk', '2020' => 'Sales Queue', '2100' => 'Warehouse',
     '2200' => 'Billing',
 ];
-$requestOptions = [
-    'rows' => $rows,
-    'extension_names' => $extensionNames,
+$cdrgenRequestOptions = [
+    'rows' => $cdrgenRows,
+    'extension_names' => $cdrgenExtensionNames,
     'accountcode' => 'CCTESTPENDING',
-    'timezone' => $timezoneName,
+    'timezone' => $cdrgenTimezoneName,
 ];
-$identityRequest = new GenerationRequest(
-    $profile,
-    $start,
-    $end,
-    $scenarioRandom,
-    $extensions,
-    $trunks,
-    $requestOptions
+$cdrgenIdentityRequest = new GenerationRequest(
+    $cdrgenProfile,
+    $cdrgenStart,
+    $cdrgenEnd,
+    $cdrgenScenarioRandom,
+    $cdrgenExtensions,
+    $cdrgenTrunks,
+    $cdrgenRequestOptions
 );
-$accountcode = isset($options['fixture-accountcode'])
-    ? RunIdentity::deterministicAccountcode($identityRequest->datasetIdentity())
+$cdrgenAccountcode = isset($cdrgenOptions['fixture-accountcode'])
+    ? RunIdentity::deterministicAccountcode($cdrgenIdentityRequest->datasetIdentity())
     : RunIdentity::randomAccountcode();
-$requestOptions['accountcode'] = $accountcode;
-$request = new GenerationRequest(
-    $profile,
-    $start,
-    $end,
-    $scenarioRandom,
-    $extensions,
-    $trunks,
-    $requestOptions
+$cdrgenRequestOptions['accountcode'] = $cdrgenAccountcode;
+$cdrgenRequest = new GenerationRequest(
+    $cdrgenProfile,
+    $cdrgenStart,
+    $cdrgenEnd,
+    $cdrgenScenarioRandom,
+    $cdrgenExtensions,
+    $cdrgenTrunks,
+    $cdrgenRequestOptions
 );
 
-$started = microtime(true);
-$result = (new Generator())->generate($request);
-$elapsed = microtime(true) - $started;
+$cdrgenStarted = microtime(true);
+$cdrgenResult = (new Generator())->generate($cdrgenRequest);
+$cdrgenElapsed = microtime(true) - $cdrgenStarted;
 
 echo "cdrgen\n======\n";
 echo 'Version: ' . Version::VERSION . " (testing only)\n";
-echo "Profile: {$profileName}\nRows: {$rows}\nSeed: {$seed}\nTimezone: {$timezoneName}\n";
-echo 'Range: ' . formatTimestamp($start, $timezone) . ' to ' . formatTimestamp($end, $timezone) . "\n";
-echo 'Dataset identity: ' . $result->datasetIdentity() . "\nAccountcode: {$accountcode}\n\n";
+echo "Profile: {$cdrgenProfileName}\nRows: {$cdrgenRows}\nSeed: {$cdrgenSeed}\nTimezone: {$cdrgenTimezoneName}\n";
+echo 'Range: ' . formatTimestamp($cdrgenStart, $cdrgenTimezone) . ' to ' . formatTimestamp($cdrgenEnd, $cdrgenTimezone) . "\n";
+echo 'Dataset identity: ' . $cdrgenResult->datasetIdentity() . "\nAccountcode: {$cdrgenAccountcode}\n\n";
 
-if ($cdrPdo !== null) {
-    $repository = new CdrRepository($cdrPdo, $metadata);
-    $inserted = $repository->insertAll($result->rows());
-    if ($inserted !== count($result->rows())) {
-        throw new RuntimeException("Committed row count {$inserted} does not match generated count " . count($result->rows()));
+if ($cdrgenCdrPdo !== null) {
+    $cdrgenRepository = new CdrRepository($cdrgenCdrPdo, $cdrgenMetadata);
+    $cdrgenInserted = $cdrgenRepository->insertAll($cdrgenResult->rows());
+    if ($cdrgenInserted !== count($cdrgenResult->rows())) {
+        throw new RuntimeException("Committed row count {$cdrgenInserted} does not match generated count " . count($cdrgenResult->rows()));
     }
-    echo "Inserted {$inserted} rows into asteriskcdrdb.cdr\n\n";
+    echo "Inserted {$cdrgenInserted} rows into asteriskcdrdb.cdr\n\n";
 } else {
-    echo 'Generated in memory in ' . number_format($elapsed, 3) . "s (no database writes)\n\n";
+    echo 'Generated in memory in ' . number_format($cdrgenElapsed, 3) . "s (no database writes)\n\n";
 }
-printStatistics($result->statistics());
-printExpected((new ExpectedConcurrencyCalculator($semantics))->calculate($result->rows()));
+printStatistics($cdrgenResult->statistics());
+printExpected((new ExpectedConcurrencyCalculator($cdrgenSemantics))->calculate($cdrgenResult->rows()));
 
-if ($cdrPdo !== null) {
+if ($cdrgenCdrPdo !== null) {
     echo "\nCleanup SQL\n-----------\n";
-    echo "mysql asteriskcdrdb -e \"DELETE FROM cdr WHERE accountcode = '{$accountcode}';\"\n";
-    promptCleanup($repository, $accountcode);
+    echo "mysql asteriskcdrdb -e \"DELETE FROM cdr WHERE accountcode = '{$cdrgenAccountcode}';\"\n";
+    promptCleanup($cdrgenRepository, $cdrgenAccountcode);
 }
 
 function usage(int $exitCode): void

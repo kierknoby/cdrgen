@@ -425,6 +425,24 @@ test('wizard accepts abbreviated profile and prints confirmation summary without
     assertTrue(strpos($text, 'Cancelled.') !== false);
 });
 
+test('FreePBX bootstrap globals cannot overwrite CDRgen timezone state', static function (): void {
+    $cdrgenTimezone = new DateTimeZone('America/New_York');
+    require __DIR__ . '/fixtures/freepbx-bootstrap-pollution.php';
+    assertSame($timezone, 'UTC', 'pollution fixture did not simulate generic timezone');
+    assertTrue($cdrgenTimezone instanceof DateTimeZone);
+    assertSame($cdrgenTimezone->getName(), 'America/New_York');
+
+    $source = file_get_contents(__DIR__ . '/../cdrgen.php');
+    assertTrue(strpos($source, 'formatTimestamp($cdrgenStart, $cdrgenTimezone)') !== false);
+    $beforeBootstrap = strstr($source, "require_once '/etc/freepbx.conf';", true);
+    foreach (['$timezone =', '$profile =', '$options =', '$metadata ='] as $unsafeDeclaration) {
+        assertTrue(
+            strpos($beforeBootstrap, $unsafeDeclaration) === false,
+            'generic bootstrap-crossing declaration remains: ' . $unsafeDeclaration
+        );
+    }
+});
+
 $failures = 0;
 $started = microtime(true);
 foreach ($tests as $name => $callback) {
