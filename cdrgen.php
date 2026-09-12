@@ -24,12 +24,14 @@ use CdrGen\TrafficProfile;
 use CdrGen\TrunkProfiler;
 use CdrGen\Version;
 
-$cdrgenLongOptions = [
-    'profile::', 'seed::', 'rows::', 'start::', 'end::',
-    'trunks::', 'fake-trunks::', 'concurrency-semantics::',
-    'timezone::', 'dry-run', 'fixture-accountcode', 'keep', 'help',
+$cdrgenOptionSpec = [
+    'profile' => 'value', 'seed' => 'value', 'rows' => 'value',
+    'start' => 'value', 'end' => 'value', 'trunks' => 'value',
+    'fake-trunks' => 'value', 'concurrency-semantics' => 'value',
+    'timezone' => 'value', 'dry-run' => 'flag',
+    'fixture-accountcode' => 'flag', 'keep' => 'flag', 'help' => 'flag',
 ];
-$cdrgenOptions = $argc === 1 ? runWizard() : getopt('', $cdrgenLongOptions);
+$cdrgenOptions = $argc === 1 ? runWizard() : parseCommandLine(array_slice($argv, 1), $cdrgenOptionSpec);
 if (isset($cdrgenOptions['help'])) {
     usage(0);
 }
@@ -245,6 +247,34 @@ function cliProgress(string $label, int $total): callable
             flush();
         }
     };
+}
+
+function parseCommandLine(array $arguments, array $optionSpec): array
+{
+    $options = [];
+    foreach ($arguments as $argument) {
+        if (strpos($argument, '--') !== 0 || $argument === '--') {
+            fail("Unknown command-line argument: {$argument}");
+        }
+        $option = substr($argument, 2);
+        $separator = strpos($option, '=');
+        $name = $separator === false ? $option : substr($option, 0, $separator);
+        if (!isset($optionSpec[$name])) {
+            fail("Unknown option: --{$name}");
+        }
+        if ($optionSpec[$name] === 'flag') {
+            if ($separator !== false) {
+                fail("Option --{$name} does not accept a value");
+            }
+            $options[$name] = false;
+            continue;
+        }
+        if ($separator === false || substr($option, $separator + 1) === '') {
+            fail("Option --{$name} requires a value in --{$name}=VALUE form");
+        }
+        $options[$name] = substr($option, $separator + 1);
+    }
+    return $options;
 }
 
 function usage(int $exitCode): void

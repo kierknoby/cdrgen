@@ -1191,6 +1191,47 @@ test('CLI help and restored wizard contracts are present', static function (): v
     }
 });
 
+test('CLI rejects unknown and malformed options before generation', static function (): void {
+    $entrypoint = escapeshellarg(__DIR__ . '/../cdrgen.php');
+    $output = [];
+    $status = 0;
+    exec(PHP_BINARY . ' ' . $entrypoint
+        . ' --profile=light --definitely-not-an-option --dry-run 2>&1', $output, $status);
+    $text = implode("\n", $output);
+    assertTrue($status !== 0);
+    assertTrue(strpos($text, 'Unknown option: --definitely-not-an-option') !== false);
+    assertTrue(strpos($text, "cdrgen\n======") === false);
+    assertTrue(strpos($text, 'Generating CDRs:') === false);
+
+    foreach (['--dry-run=yes', '--keep=no', '--help=foo'] as $malformedFlag) {
+        $output = [];
+        $status = 0;
+        exec(PHP_BINARY . ' ' . $entrypoint . ' ' . escapeshellarg($malformedFlag) . ' 2>&1', $output, $status);
+        assertTrue($status !== 0, "valued flag {$malformedFlag} was accepted");
+        assertTrue(strpos(implode("\n", $output), 'does not accept a value') !== false);
+    }
+
+    $output = [];
+    $status = 0;
+    exec(PHP_BINARY . ' ' . $entrypoint . ' --profile 2>&1', $output, $status);
+    assertTrue($status !== 0, 'missing value option was accepted');
+    assertTrue(strpos(implode("\n", $output), '--profile requires a value') !== false);
+});
+
+test('CLI accepts valid boolean flags with normal value options', static function (): void {
+    $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/../cdrgen.php')
+        . ' --profile=light --seed=123 --start=' . escapeshellarg('2026-05-01 00:00:00')
+        . ' --end=' . escapeshellarg('2026-05-02 00:00:00')
+        . ' --fixture-accountcode --keep --dry-run 2>&1';
+    $output = [];
+    $status = 0;
+    exec($command, $output, $status);
+    $text = implode("\n", $output);
+    assertSame($status, 0);
+    assertTrue(strpos($text, 'Generating CDRs: 250 / 250 [100%]') !== false);
+    assertTrue(strpos($text, 'no database writes') !== false);
+});
+
 test('CLI dry-run reports progress and performs no database writes', static function (): void {
     $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/../cdrgen.php')
         . ' --profile=light --seed=123 --start=' . escapeshellarg('2026-05-01 00:00:00')
