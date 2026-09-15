@@ -1,26 +1,74 @@
 # CDRgen
 
-CDRgen creates coherent synthetic Asterisk/FreePBX call detail records (CDRs) for report testing, data validation and expected-concurrency analysis. It provides a standalone CLI and a reusable, dependency-free PHP generation core. Given the same complete inputs, generation is deterministic.
+CDRgen generates realistic synthetic call detail records (CDRs) for FreePBX 16/17 and Asterisk so you can safely test reports, expected concurrency and CDR-dependent changes without placing real calls. It can be used as a standalone CLI or as a reusable, dependency-free PHP generation core, and its generation core is used by Concurrency Count 2.
 
-In live mode, CDRgen writes synthetic reporting data. It does not place real calls, create live channels or RTP/media, exercise dialplan execution or carrier signalling, generate CEL records, or create real recordings. A reported expected-concurrency peak of 200 means that 200 generated CDR intervals overlap at the busiest calculated second. It does not mean that 200 physical calls occurred on the PBX.
+In live mode, CDRgen writes temporary synthetic reporting data to the CDR table, analyses it, then removes the exact generated dataset by default. It does not place real calls, create live channels or RTP/media, exercise dialplan execution or carrier signalling, generate CEL records, or create real recordings. A reported expected-concurrency peak of 200 means that 200 generated CDR intervals overlap at the busiest calculated second, not that 200 physical calls occurred on the PBX.
 
-Core version: `1.1.0`. `CdrGen\Version::BASE_REVISION` records the reviewed upstream base (`f3dcc9f...`); `SOURCE_REVISION` remains `null` until a packager or importer can record an exact committed source revision.
+## Compatibility
+
+The live CLI is designed and tested for FreePBX 16 and 17 / PBXact environments. The reusable core requires PHP 7.4 or later. Live mode requires `/etc/freepbx.conf`, a PDO MySQL driver, an accessible InnoDB `asteriskcdrdb.cdr` table, and PHP `pcntl_signal()` plus `pcntl_async_signals()`. MariaDB 5.5/InnoDB is part of the production validation target. Dry run does not require FreePBX or a database.
+
+## Installation
+
+CDRgen installation and live operation are intended to be run as `root`.
+
+```bash
+git clone https://github.com/kierknoby/cdrgen.git ~/cdrgen
+~/cdrgen/install.sh
+```
+
+The installer makes CDRgen available as `cdrgen`, links it through `/usr/local/bin/cdrgen`, and creates or verifies the protected `/var/lib/cdrgen` safety-state directory. It rejects a pre-existing state-directory symlink or non-directory rather than modifying it.
 
 ## Quick Start
 
-Generate a database-free Light dataset:
+Generate and analyse a database-free Light dataset:
 
 ```bash
-php cdrgen.php --profile=light --seed=101 --dry-run
+cdrgen --profile=light --seed=101 --dry-run
 ```
 
-Run without arguments to use the interactive wizard:
+Run the interactive wizard:
 
 ```bash
-php cdrgen.php
+cdrgen
 ```
 
-A live run bootstraps FreePBX, discovers configured trunks, validates the CDR schema and recovery state, inserts one tagged dataset, reports its statistics and expected concurrency, then deletes that exact dataset unless `--keep` was supplied. Use a test PBX and review the generated data before relying on a validation result.
+A live run bootstraps FreePBX, discovers configured trunks, validates the CDR schema and recovery state, inserts one tagged dataset, reports its statistics and expected concurrency, then deletes that exact dataset unless `--keep` was supplied. Start with a test PBX and the Light profile when validating a new environment.
+
+## Removal
+
+Before removing CDRgen, confirm that no synthetic CDRs or recovery state remain:
+
+```bash
+mysql asteriskcdrdb -NBe \
+  "SELECT accountcode, COUNT(*) FROM cdr WHERE accountcode LIKE 'CCTEST%' GROUP BY accountcode;"
+
+test ! -e /var/lib/cdrgen/active-run.json && \
+  echo "active-run.json: ABSENT" || \
+  echo "active-run.json: PRESENT"
+```
+
+Do not remove the recovery state if a retained or recoverable CDRgen dataset is still present.
+
+Remove the installed command:
+
+```bash
+rm -f /usr/local/bin/cdrgen
+```
+
+Remove the source checkout if it is no longer required. For the installation shown above:
+
+```bash
+rm -rf ~/cdrgen
+```
+
+Once there are no retained CDRgen rows and no recovery record, remove the CDRgen state directory:
+
+```bash
+rm -rf /var/lib/cdrgen
+```
+
+CDRgen does not install additional system packages, services or database tables.
 
 ## Workload Profiles
 
@@ -37,7 +85,7 @@ The common one-day range makes the profiles increasing traffic-intensity classes
 `--rows` overrides the selected profile's row count:
 
 ```bash
-php cdrgen.php --profile=heavy --rows=50000 --dry-run
+cdrgen --profile=heavy --rows=50000 --dry-run
 ```
 
 Generated rows are retained in PHP memory for reporting and concurrency analysis. The standard profiles are deliberately bounded, but practical limits for larger `--rows` values depend on the PHP runtime, FreePBX environment, schema and host. More rows increase synthetic CDR density and exercise generation, database insertion, reporting and concurrency calculation more heavily, but still do not stress Asterisk's live call path.
@@ -73,7 +121,7 @@ CDRgen controls rows in the active CDR table only. Database replicas, backups, e
 `--keep` deliberately leaves the completed live dataset in the CDR table and preserves its recovery state:
 
 ```bash
-sudo cdrgen --profile=medium --seed=202 --keep
+cdrgen --profile=medium --seed=202 --keep
 ```
 
 Record the exact accountcode printed by the run. Inspect or remove only that value:
@@ -113,9 +161,9 @@ Value options use `--name=value`; the four flags take no value. Unknown options,
 Examples:
 
 ```bash
-php cdrgen.php --profile=medium --seed=202
-php cdrgen.php --profile=heavy --seed=303 --keep
-php cdrgen.php --profile=medium --rows=5000 \
+cdrgen --profile=medium --seed=202
+cdrgen --profile=heavy --seed=303 --keep
+cdrgen --profile=medium --rows=5000 \
   --start="2026-05-01 00:00:00" --end="2026-05-02 00:00:00" \
   --timezone=UTC --seed=202 \
   --trunks=PJSIP/Primary-In,PJSIP/Primary-Out,SIP/Failover-Test --dry-run
@@ -145,6 +193,8 @@ Output includes global, per-trunk, per-extension handled-call and per-extension 
 These are expected overlaps in synthetic CDR data, not measurements of real channels, media sessions or simultaneous physical calls.
 
 ## Reusable Generation Core
+
+Core version: `1.1.0`. `CdrGen\Version::BASE_REVISION` records the reviewed upstream base (`f3dcc9f...`); `SOURCE_REVISION` remains `null` until a packager or importer can record an exact committed source revision.
 
 Load the dependency-free autoloader, or provide your own PSR-4 loader:
 
@@ -190,17 +240,6 @@ The core requires PHP 7.4+, has no Composer, FreePBX, database, network or Git d
 `SchemaMapper` projects only fields supported by `SHOW COLUMNS` metadata, omits auto-increment columns and permits missing nullable/defaulted optional columns. It rejects unknown mandatory columns and values whose byte length exceeds discovered CHAR/VARCHAR bounds rather than depending on SQL strict mode. This conservative byte check may reject some representable non-ASCII text, but it cannot permit silent truncation.
 
 `CdrRepository` uses prepared statements and one transaction. Before commit it verifies both the exact accountcode row count and the byte-exact marker count. MySQL/MariaDB live writes require a positively identified InnoDB `asteriskcdrdb.cdr` table at the write boundary. Cleanup accepts only the full `CCTEST` plus 14-lowercase-hex shape and verifies zero rows afterwards.
-
-## Requirements and Installation
-
-The reusable core requires PHP 7.4 or later. The live CLI is designed and tested for FreePBX 16 and 17 / PBXact environments with `/etc/freepbx.conf`, a PDO MySQL driver, an accessible `asteriskcdrdb.cdr` table using InnoDB, and PHP `pcntl_signal()` plus `pcntl_async_signals()`. MariaDB 5.5/InnoDB is part of the production validation target. Dry run does not require FreePBX or a database.
-
-```bash
-git clone https://github.com/kierknoby/cdrgen.git ~/cdrgen
-sudo ~/cdrgen/install.sh
-```
-
-The installer rejects a pre-existing `/var/lib/cdrgen` symlink or non-directory before changing ownership or permissions. It makes `cdrgen.php` executable, links it as `/usr/local/bin/cdrgen`, and creates or verifies `/var/lib/cdrgen` as `root:root` mode `0700`. Live CDRgen is therefore an administrative command; the Asterisk service account receives no write access to trusted safety state.
 
 ## Validation and Development
 
