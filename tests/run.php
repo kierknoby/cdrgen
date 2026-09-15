@@ -1283,6 +1283,7 @@ test('CLI dry-run reports progress and performs no database writes', static func
     assertTrue($reportingPosition !== false && $reportingPosition < $trafficPosition);
     assertTrue($trafficPosition !== false && $trafficPosition < $waitPosition);
     assertTrue($waitPosition !== false && $waitPosition < $expectedPosition);
+    assertTrue(strpos($text, "Please wait...\n\nExpected ANSWERED concurrency") !== false);
 });
 
 test('wizard accepts abbreviated profile and prints confirmation summary without PBX access', static function (): void {

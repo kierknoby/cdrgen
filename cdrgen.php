@@ -190,7 +190,7 @@ if ($cdrgenCdrPdo !== null) {
 }
 echo "Calculating/reporting concurrency...\n";
 printStatistics($cdrgenResult->statistics());
-echo "Please wait...\n";
+echo "Please wait...\n\n";
 $cdrgenConfiguredTrunkChannels = array_map(static function (array $trunk): string {
     return (string) ($trunk['channel'] ?? '');
 }, $cdrgenTrunks);
