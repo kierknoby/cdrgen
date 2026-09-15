@@ -4,7 +4,7 @@ CDRgen creates coherent synthetic Asterisk/FreePBX call detail records (CDRs) fo
 
 In live mode, CDRgen writes synthetic reporting data. It does not place real calls, create live channels or RTP/media, exercise dialplan execution or carrier signalling, generate CEL records, or create real recordings. A reported expected-concurrency peak of 200 means that 200 generated CDR intervals overlap at the busiest calculated second. It does not mean that 200 physical calls occurred on the PBX.
 
-Core version: `1.1.0-dev`. `CdrGen\Version::BASE_REVISION` records the reviewed upstream base (`f3dcc9f...`); `SOURCE_REVISION` remains `null` until a packager or importer can record an exact committed source revision. This is a development build for testing and validation, not a production CDR source.
+Core version: `1.1.0`. `CdrGen\Version::BASE_REVISION` records the reviewed upstream base (`f3dcc9f...`); `SOURCE_REVISION` remains `null` until a packager or importer can record an exact committed source revision.
 
 ## Quick Start
 
@@ -231,7 +231,7 @@ The test suite covers profile definitions, deterministic identities, request/inv
 
 ### 1.1.0
 
-The minor release adds a reusable, versioned deterministic core while retaining the standalone CLI; deterministic dataset identity; schema-aware transactional persistence; exact cleanup and database-marker recovery; improved FreePBX bootstrap compatibility; configured numeric PJSIP trunk classification; progress and wait feedback; strict CLI parsing; wizard date freezing; intensity-based profiles; and broader production validation.
+This minor release adds a reusable, versioned deterministic core while retaining the standalone CLI; deterministic dataset identity; schema-aware transactional persistence; exact cleanup and database-marker recovery; improved FreePBX bootstrap compatibility; configured numeric PJSIP trunk classification; progress and wait feedback; strict CLI parsing; wizard date freezing; intensity-based profiles; and broader production validation.
 
 ## Licence
 

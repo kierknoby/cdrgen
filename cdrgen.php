@@ -166,7 +166,7 @@ if ($cdrgenLiveGuard !== null) {
 }
 
 echo "cdrgen\n======\n";
-echo 'Version: ' . Version::VERSION . " (testing only)\n";
+echo 'Version: ' . Version::VERSION . "\n";
 echo "Profile: {$cdrgenProfileName}\nRows: {$cdrgenRows}\nSeed: {$cdrgenSeed}\nTimezone: {$cdrgenTimezoneName}\n";
 echo 'Range: ' . formatTimestamp($cdrgenStart, $cdrgenTimezone) . ' to ' . formatTimestamp($cdrgenEnd, $cdrgenTimezone) . "\n";
 echo "Accountcode: {$cdrgenAccountcode}\n\n";
@@ -294,7 +294,7 @@ function usage(int $exitCode): void
 function runWizard(): array
 {
     echo "cdrgen interactive wizard\n=========================\n";
-    echo 'Version: ' . Version::VERSION . " (testing only)\n\n";
+    echo 'Version: ' . Version::VERSION . "\n\n";
     $options = [];
     $profileName = ask('Profile [light/medium/heavy]', 'light', static function (string $input) {
         return matchProfile($input) ?? false;

@@ -266,7 +266,7 @@ test('profile definitions and version metadata', static function (): void {
     assertSame(TrafficProfile::named('heavy')->rows(), 20000);
     assertSame(TrafficProfile::named('heavy')->days(), 1);
     assertSame(TrafficProfile::named('heavy')->maximumDuration(), 2400);
-    assertSame(Version::VERSION, '1.1.0-dev');
+    assertSame(Version::VERSION, '1.1.0');
     assertTrue(preg_match('/^[0-9a-f]{40}$/', Version::BASE_REVISION) === 1);
     assertSame(Version::SOURCE_REVISION, null);
 });
