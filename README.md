@@ -24,13 +24,13 @@ CDRgen models realistic reporting data, not complete Asterisk signalling, CEL ev
 
 ## Traffic model
 
-Profiles retain the established workload sizes:
+Profiles use the following workload sizes:
 
 | Profile | Rows | Range | Answered duration range |
 |---|---:|---:|---:|
-| Light | 250 | 1 day | 15–720 seconds |
-| Medium | 2,500 | 7 days | 15–1,200 seconds |
-| Heavy | 15,000 | 30 days | 15–2,400 seconds |
+| Light | 1,000 | 1 day | 15–720 seconds |
+| Medium | 5,000 | 1 day | 15–1,200 seconds |
+| Heavy | 20,000 | 1 day | 15–2,400 seconds |
 
 Generation models weekday/weekend demand, morning/lunch/afternoon/evening variations, minute-of-hour effects, rare traffic spikes, and burst clustering. Calls are inbound, outbound, or internal with time-sensitive direction and disposition probabilities. Dispositions are `ANSWERED`, `NO ANSWER`, `BUSY`, and `FAILED`; answered durations use short/medium/long classes and ring time, while unsuccessful calls are shorter with zero billsec.
 

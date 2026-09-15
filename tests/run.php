@@ -259,8 +259,12 @@ function removeSignalArtifacts(string $directory, string $database): void
 }
 
 test('profile definitions and version metadata', static function (): void {
-    assertSame(TrafficProfile::named('light')->rows(), 250);
-    assertSame(TrafficProfile::named('medium')->days(), 7);
+    assertSame(TrafficProfile::named('light')->rows(), 1000);
+    assertSame(TrafficProfile::named('light')->days(), 1);
+    assertSame(TrafficProfile::named('medium')->rows(), 5000);
+    assertSame(TrafficProfile::named('medium')->days(), 1);
+    assertSame(TrafficProfile::named('heavy')->rows(), 20000);
+    assertSame(TrafficProfile::named('heavy')->days(), 1);
     assertSame(TrafficProfile::named('heavy')->maximumDuration(), 2400);
     assertSame(Version::VERSION, '1.1.0-dev');
     assertTrue(preg_match('/^[0-9a-f]{40}$/', Version::BASE_REVISION) === 1);
@@ -1255,7 +1259,7 @@ test('CLI accepts valid boolean flags with normal value options', static functio
     exec($command, $output, $status);
     $text = implode("\n", $output);
     assertSame($status, 0);
-    assertTrue(strpos($text, 'Generating CDRs: 250 / 250 [100%]') !== false);
+    assertTrue(strpos($text, 'Generating CDRs: 1000 / 1000 [100%]') !== false);
     assertTrue(strpos($text, 'no database writes') !== false);
 });
 
@@ -1268,8 +1272,8 @@ test('CLI dry-run reports progress and performs no database writes', static func
     exec($command, $output, $status);
     $text = implode("\n", $output);
     assertSame($status, 0);
-    assertTrue(strpos($text, 'Generating CDRs: 0 / 250 [0%]') !== false);
-    assertTrue(strpos($text, 'Generating CDRs: 250 / 250 [100%]') !== false);
+    assertTrue(strpos($text, 'Generating CDRs: 0 / 1000 [0%]') !== false);
+    assertTrue(strpos($text, 'Generating CDRs: 1000 / 1000 [100%]') !== false);
     assertTrue(strpos($text, 'no database writes') !== false);
     assertTrue(strpos($text, 'Writing CDRs:') === false);
     assertTrue(strpos($text, "Calculating/reporting concurrency...\nPlease wait...") !== false);
@@ -1294,7 +1298,7 @@ test('wizard profile-default dates are frozen as exact execution options', stati
     $profile = TrafficProfile::named('heavy');
     $options = WizardDateRange::profileDefault($profile, $now, 'UTC');
     assertSame($options, [
-        'start' => '2026-08-13 20:31:18',
+        'start' => '2026-09-11 20:31:18',
         'end' => '2026-09-12 20:31:18',
     ]);
 
