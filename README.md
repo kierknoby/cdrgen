@@ -193,7 +193,7 @@ The core requires PHP 7.4+, has no Composer, FreePBX, database, network or Git d
 
 ## Requirements and Installation
 
-The reusable core requires PHP 7.4 or later. The live CLI is designed for a Linux FreePBX or PBXact installation with `/etc/freepbx.conf`, a PDO MySQL driver, an accessible `asteriskcdrdb.cdr` table using InnoDB, and PHP `pcntl_signal()` plus `pcntl_async_signals()`. MariaDB 5.5/InnoDB is part of the production validation target. Dry run does not require FreePBX or a database.
+The reusable core requires PHP 7.4 or later. The live CLI is designed and tested for FreePBX 16 and 17 / PBXact environments with `/etc/freepbx.conf`, a PDO MySQL driver, an accessible `asteriskcdrdb.cdr` table using InnoDB, and PHP `pcntl_signal()` plus `pcntl_async_signals()`. MariaDB 5.5/InnoDB is part of the production validation target. Dry run does not require FreePBX or a database.
 
 ```bash
 git clone https://github.com/kierknoby/cdrgen.git ~/cdrgen
