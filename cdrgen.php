@@ -188,7 +188,7 @@ if ($cdrgenCdrPdo !== null) {
 } else {
     echo 'Generated in memory in ' . number_format($cdrgenElapsed, 3) . "s (no database writes)\n\n";
 }
-echo "Calculating/reporting concurrency. Please wait...\n";
+echo "Calculating/reporting concurrency...\nPlease wait...\n";
 printStatistics($cdrgenResult->statistics());
 $cdrgenConfiguredTrunkChannels = array_map(static function (array $trunk): string {
     return (string) ($trunk['channel'] ?? '');

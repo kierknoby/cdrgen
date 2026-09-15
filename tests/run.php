@@ -1199,7 +1199,7 @@ test('opaque CLI stages and confirmed wizard transition provide wait feedback', 
         'Loading FreePBX configuration. Please wait...',
         'Discovering configured trunks. Please wait...',
         'Checking CDR schema and recovery state. Please wait...',
-        'Calculating/reporting concurrency. Please wait...',
+        "Calculating/reporting concurrency...\\nPlease wait...",
     ] as $message) {
         assertTrue(strpos($source, $message) !== false, 'missing wait feedback: ' . $message);
     }
@@ -1272,7 +1272,7 @@ test('CLI dry-run reports progress and performs no database writes', static func
     assertTrue(strpos($text, 'Generating CDRs: 250 / 250 [100%]') !== false);
     assertTrue(strpos($text, 'no database writes') !== false);
     assertTrue(strpos($text, 'Writing CDRs:') === false);
-    assertTrue(strpos($text, 'Calculating/reporting concurrency. Please wait...') !== false);
+    assertTrue(strpos($text, "Calculating/reporting concurrency...\nPlease wait...") !== false);
 });
 
 test('wizard accepts abbreviated profile and prints confirmation summary without PBX access', static function (): void {
