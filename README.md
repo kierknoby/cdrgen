@@ -229,9 +229,9 @@ The test suite covers profile definitions, deterministic identities, request/inv
 
 ## Release History
 
-### 1.1.0 (Pending)
+### 1.1.0
 
-The development release adds a reusable, versioned deterministic core while retaining the standalone CLI; deterministic dataset identity; schema-aware transactional persistence; exact cleanup and database-marker recovery; improved FreePBX bootstrap compatibility; configured numeric PJSIP trunk classification; progress and wait feedback; strict CLI parsing; wizard date freezing; intensity-based profiles; and broader production validation.
+The minor release adds a reusable, versioned deterministic core while retaining the standalone CLI; deterministic dataset identity; schema-aware transactional persistence; exact cleanup and database-marker recovery; improved FreePBX bootstrap compatibility; configured numeric PJSIP trunk classification; progress and wait feedback; strict CLI parsing; wizard date freezing; intensity-based profiles; and broader production validation.
 
 ## Licence
 
@@ -251,4 +251,4 @@ The human contributor remains solely responsible for the contribution. AI tools 
 
 ## Author
 
-[@kierknoby](https://github.com/kierknoby), Kieran Knowles-Byrne
+[@kierknoby](https://github.com/kierknoby), Kieran Knowles-Byrne // [@freepbxUK](https://github.com/freepbxUK)
